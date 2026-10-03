@@ -2874,6 +2874,10 @@ this option to replace the running app immediately. The default is `true`.
         <td>nvfbc</td>
         <td>Use NVIDIA Frame Buffer Capture to capture direct to GPU memory. This is usually the fastest method for
             NVIDIA cards. NvFBC does not have native Wayland support and does not work with XWayland.
+            On X11 builds with `SUNSHINE_ENABLE_NVFBC_VK` (default on) frames stay in GPU memory, which
+            lets PyroWave encode them without a CPU copy; other codecs use the regular NvFBC path.
+            Builds without CUDA support (`SUNSHINE_ENABLE_CUDA=OFF`) can still use NvFBC for PyroWave and
+            software/VAAPI encoders when `capture = nvfbc` is set explicitly. HDR is not supported.
             @note{Applies to Linux only.}</td>
     </tr>
     <tr>

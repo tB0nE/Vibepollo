@@ -86,6 +86,8 @@ elseif(UNIX)  # Linux
             "Enable building wayland specific code." ON)
     option(SUNSHINE_ENABLE_X11
             "Enable X11 grab if available." ON)
+    option(SUNSHINE_ENABLE_NVFBC_VK
+            "Enable NvFBC capture that feeds the Vulkan PyroWave encoder from GPU memory (no CUDA toolkit needed; X11 + NVIDIA)." ON)
     option(SUNSHINE_ENABLE_KWIN
             "Enable KWin ScreenCast grab if available" ON)
     option(SUNSHINE_ENABLE_PORTAL

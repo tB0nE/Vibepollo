@@ -23,6 +23,9 @@ namespace pyrowave::linux_gpu {
     // RAM capture and test images are BGRA8. Stride is in bytes.
     const std::uint8_t *pixels = nullptr;
     int width = 0, height = 0, stride = 0;
+    // GPU-resident capture (NvFBC): CUdeviceptr to pitch-linear BGRA8 in the primary CUDA
+    // context, with `stride` as the pitch. Mutually exclusive with `surface` and `pixels`.
+    std::uint64_t cuda_ptr = 0;
     int offset_x = 0, offset_y = 0;
     bool y_invert = false;
     const std::uint8_t *cursor = nullptr;

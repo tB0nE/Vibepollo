@@ -224,6 +224,19 @@ if(X11_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/x11grab.cpp")
 endif()
 
+# NvFBC -> Vulkan PyroWave. Uses only the CUDA driver (dlopen), so it works with or without
+# the full CUDA backend. With it, PyroWave sessions use this display and the other codecs keep
+# the CUDA NvFBC -> NVENC path.
+if(SUNSHINE_ENABLE_NVFBC_VK AND SUNSHINE_ENABLE_PYROWAVE)
+    add_compile_definitions(SUNSHINE_BUILD_NVFBC_VK)
+    include_directories(SYSTEM
+            "${CMAKE_SOURCE_DIR}/third-party/nvfbc"
+            "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/nvfbc_vk.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/nvfbc_vk.cpp")
+endif()
+
 # GIO
 pkg_check_modules(GIO gio-2.0 gio-unix-2.0 REQUIRED)
 if(GIO_FOUND)
@@ -409,10 +422,12 @@ if(SUNSHINE_ENABLE_PYROWAVE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         VERBATIM)
     add_library(pyrowave-linux STATIC
         "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_core.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda_shared.cpp"
         "${PYROWAVE_SHADER_DIR}/pyrowave.spv.inc")
     target_compile_features(pyrowave-linux PRIVATE cxx_std_17)
     target_compile_options(pyrowave-linux PRIVATE -fvisibility=hidden)
     target_include_directories(pyrowave-linux PRIVATE "${CMAKE_BINARY_DIR}/generated-src" ${LIBDRM_INCLUDE_DIRS})
+    target_include_directories(pyrowave-linux SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
     target_link_libraries(pyrowave-linux PRIVATE pyrowave granite-vulkan)
     list(APPEND PLATFORM_LIBRARIES pyrowave-linux)
     list(APPEND PLATFORM_TARGET_FILES "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp")
