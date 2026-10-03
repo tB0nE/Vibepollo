@@ -3,6 +3,9 @@
  */
 #include "graphics.h"
 #include "pyrowave_core.h"
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+  #include "nvfbc_vk.h"
+#endif
 #include "src/platform/common.h"
 #include "src/pyrowave_host.h"
 #include "src/pyrowave_protocol.h"
@@ -31,8 +34,7 @@ namespace pyrowave::host {
       encoder_impl_t(const session_params_t &p, std::shared_ptr<platf::display_t> d):
           params(p),
           display(std::move(d)),
-          budget(p.framerate, p.bitrate_kbps, policy::max_bitstream_bytes(p.packetsize, p.framing == policy::framing_e::length_prefixed, p.critical_fec),
-                 p.critical_fec && p.framing == policy::framing_e::records) {}
+          budget(p.framerate, p.bitrate_kbps, policy::max_bitstream_bytes(p.packetsize, p.framing == policy::framing_e::length_prefixed, p.critical_fec), p.critical_fec && p.framing == policy::framing_e::records) {}
 
       void set_bitrate(int bitrate) override {
         budget.set_bitrate(bitrate);
@@ -69,6 +71,14 @@ namespace pyrowave::host {
           source.cursor_dst_height = img->height;
           source.lut = img->crtc_gamma_lut.get();
           capture_device = img->capture_render_device;
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+        } else if (auto *gpu = dynamic_cast<platf::nvfbc_vk_img_t *>(&image); gpu && gpu->device_ptr) {
+          // Frame is already in GPU memory; the core shares it with Vulkan without a CPU copy.
+          source.cuda_ptr = gpu->device_ptr;
+          source.width = image.width;
+          source.height = image.height;
+          source.stride = image.row_pitch;
+#endif
         } else {
           if (!image.data) {
             return 1;

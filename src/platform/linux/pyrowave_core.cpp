@@ -5,6 +5,7 @@
 
 #include "command_buffer.hpp"
 #include "context.hpp"
+#include "cuda_shared.h"
 #include "device.hpp"
 #include "pyrowave_encoder.hpp"
 
@@ -17,6 +18,7 @@
 #include <poll.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <unistd.h>
 
 namespace pyrowave::linux_gpu {
   namespace {
@@ -67,6 +69,12 @@ namespace pyrowave::linux_gpu {
     Vulkan::Program *program = nullptr;
     Vulkan::ImageHandle planes[3];
     Vulkan::BufferHandle meta_gpu, bits_gpu, meta_cpu, bits_cpu;
+    // GPU-resident capture bridge. The CUDA mapping must die before the Vulkan buffer it maps.
+    linux_cuda::driver_t *cuda = nullptr;
+    Vulkan::BufferHandle cuda_buffer;
+    std::unique_ptr<linux_cuda::external_buffer_t> cuda_shared;
+    Vulkan::ImageHandle cuda_image;
+    int cuda_width = 0, cuda_height = 0, cuda_stride = 0;
     bool initialized = false;
 
     ~impl_t() {
@@ -248,6 +256,60 @@ namespace pyrowave::linux_gpu {
       return image;
     }
 
+    // Shares one pitch-linear Vulkan buffer with CUDA so NvFBC frames never leave the GPU.
+    bool prepare_cuda(int width, int height, int stride, std::string &error) {
+      if (cuda_shared && cuda_width == width && cuda_height == height && cuda_stride == stride) {
+        return true;
+      }
+      cuda_shared.reset();
+      cuda_buffer.reset();
+      cuda_image.reset();
+      VkPhysicalDeviceIDProperties id {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+      VkPhysicalDeviceProperties2 props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
+      vkGetPhysicalDeviceProperties2(context.get_gpu(), &props);
+      if (!cuda && !(cuda = linux_cuda::acquire(id.deviceUUID, error))) {
+        return false;
+      }
+      const std::size_t size = std::size_t(stride) * height;
+      Vulkan::BufferCreateInfo info {};
+      info.size = size;
+      info.domain = Vulkan::BufferDomain::Device;
+      info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      info.misc = Vulkan::BUFFER_MISC_EXTERNAL_MEMORY_BIT;
+      cuda_buffer = device.create_buffer(info);
+      if (!cuda_buffer) {
+        error = "exportable Vulkan buffer allocation failed";
+        return false;
+      }
+      auto handle = cuda_buffer->export_handle();
+      if (!handle) {
+        error = "Vulkan buffer export failed";
+        cuda_buffer.reset();
+        return false;
+      }
+      cuda_shared = linux_cuda::external_buffer_t::import(*cuda, handle.handle, cuda_buffer->get_allocation().get_size(), size, error);
+      if (!cuda_shared) {
+        close(handle.handle);
+        cuda_buffer.reset();
+        return false;
+      }
+      auto image_info = Vulkan::ImageCreateInfo::immutable_2d_image(width, height, VK_FORMAT_B8G8R8A8_UNORM);
+      image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+      image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+      image_info.layout = Vulkan::ImageLayout::General;
+      cuda_image = device.create_image(image_info);
+      if (!cuda_image) {
+        error = "capture image allocation failed";
+        cuda_shared.reset();
+        cuda_buffer.reset();
+        return false;
+      }
+      cuda_width = width;
+      cuda_height = height;
+      cuda_stride = stride;
+      return true;
+    }
+
     bool ensure(Vulkan::BufferHandle &buffer, std::size_t size, Vulkan::BufferDomain domain) {
       if (!buffer || buffer->get_create_info().size < size) {
         Vulkan::BufferCreateInfo info {};
@@ -281,8 +343,21 @@ namespace pyrowave::linux_gpu {
       return false;
     }
     d.device.next_frame_context();
-    auto source = s.surface ? d.import(*s.surface, error) :
-                              (s.pixels && s.stride >= s.width * 4 ? d.upload(s.pixels, s.width, s.height, s.stride, VK_FORMAT_B8G8R8A8_UNORM) : Vulkan::ImageHandle {});
+    Vulkan::ImageHandle source;
+    const bool from_cuda = !s.surface && s.cuda_ptr;
+    if (s.surface) {
+      source = d.import(*s.surface, error);
+    } else if (from_cuda) {
+      if (s.stride < s.width * 4 || (s.stride & 3) || !d.prepare_cuda(s.width, s.height, s.stride, error) || !d.cuda_shared->copy_from(s.cuda_ptr, std::size_t(s.stride) * s.height, error)) {
+        if (error.empty()) {
+          error = "invalid GPU capture frame";
+        }
+        return false;
+      }
+      source = d.cuda_image;
+    } else if (s.pixels && s.stride >= s.width * 4) {
+      source = d.upload(s.pixels, s.width, s.height, s.stride, VK_FORMAT_B8G8R8A8_UNORM);
+    }
     if (!source) {
       if (error.empty()) {
         error = "no valid capture image";
@@ -311,6 +386,11 @@ namespace pyrowave::linux_gpu {
       return false;
     }
     auto cmd = d.device.request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
+    if (from_cuda) {
+      cmd->image_barrier(*source, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      cmd->copy_buffer_to_image(*source, *d.cuda_buffer, 0, {0, 0, 0}, {std::uint32_t(s.width), std::uint32_t(s.height), 1}, s.stride / 4, s.height, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+      cmd->image_barrier(*source, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
     if (s.surface) {
       cmd->acquire_image_barrier(*source, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_QUEUE_FAMILY_FOREIGN_EXT);
     }

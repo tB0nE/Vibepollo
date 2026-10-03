@@ -54,6 +54,9 @@
 // local includes
 #include "graphics.h"
 #include "misc.h"
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+  #include "nvfbc_vk.h"
+#endif
 #include "render_device.h"
 #include "src/platform/common_services.h"
 #include "src/boost_process_shim.h"
@@ -1226,6 +1229,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
       NVFBC,  ///< NvFBC
 #endif
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+      NVFBC_VK,  ///< NvFBC kept in GPU memory for the Vulkan PyroWave encoder
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
       WAYLAND,  ///< Wayland
 #endif
@@ -1250,6 +1256,12 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_GAMESCOPE
   bool gamescope_capture_selected() {
     return sources[source::GAMESCOPE];
+  }
+#endif
+
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+  bool verify_nvfbc_vk() {
+    return window_system == window_system_e::X11 && !nvfbc_vk_display_names().empty();
   }
 #endif
 
@@ -1312,7 +1324,11 @@ namespace platf {
 
   bool pyrowave_capture_supported() {
 #ifdef SUNSHINE_BUILD_CUDA
+  #ifdef SUNSHINE_BUILD_NVFBC_VK
+    return !sources[source::NVFBC] || sources[source::NVFBC_VK];
+  #else
     return !sources[source::NVFBC];
+  #endif
 #else
     return true;
 #endif
@@ -1324,6 +1340,11 @@ namespace platf {
       // Preserve the session's logical target even if Gamescope discovery now
       // fails, so capture creation can reach the regular-display fallback.
       return {"gamescope"};
+    }
+#endif
+#if defined(SUNSHINE_BUILD_NVFBC_VK) && !defined(SUNSHINE_BUILD_CUDA)
+    if (sources[source::NVFBC_VK]) {
+      return nvfbc_vk_display_names();
     }
 #endif
 #ifdef SUNSHINE_BUILD_CUDA
@@ -1503,6 +1524,16 @@ namespace platf {
       return gamescope_capture_fallback(hwdevice_type, config);
     }
 #endif
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+    if (sources[source::NVFBC_VK]
+  #ifdef SUNSHINE_BUILD_CUDA
+        && (config.videoFormat == 3 || !sources[source::NVFBC])
+  #endif
+    ) {
+      BOOST_LOG(info) << "Screencasting with NvFBC (GPU memory)"sv;
+      return nvfbc_vk_display(hwdevice_type, display_name, config);
+    }
+#endif
 #ifdef SUNSHINE_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
@@ -1587,10 +1618,22 @@ namespace platf {
       BOOST_LOG(info) << "Using KWin compositor capture for SteamOS Desktop Mode."sv;
     }
 #endif
+#if defined(SUNSHINE_BUILD_NVFBC_VK) && !defined(SUNSHINE_BUILD_CUDA)
+    // Without the CUDA backend this is the only NvFBC implementation, so it is opt-in.
+    if (config::video.capture == "nvfbc" && verify_nvfbc_vk()) {
+      sources[source::NVFBC_VK] = true;
+    }
+#endif
 #ifdef SUNSHINE_BUILD_CUDA
     if (((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") && verify_nvfbc()) {
       sources[source::NVFBC] = true;
     }
+#ifdef SUNSHINE_BUILD_NVFBC_VK
+    // PyroWave cannot read the CUDA backend's images; give it a GPU-resident NvFBC display.
+    if (sources[source::NVFBC] && verify_nvfbc_vk()) {
+      sources[source::NVFBC_VK] = true;
+    }
+#endif
 #endif
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr") && verify_wl()) {
