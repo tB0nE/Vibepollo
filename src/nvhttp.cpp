@@ -3285,17 +3285,11 @@ namespace nvhttp {
         }
         named_cert_p->cert = std::move(client.cert);
         named_cert_p->uuid = uuid_util::uuid_t::generate().string();
-        // If the device is the first one paired with the server, assign full permission.
-        bool first_client = false;
-        {
-          std::lock_guard<std::mutex> lock(client_mutex);
-          first_client = client_root.named_devices.empty();
-        }
-        if (first_client) {
-          named_cert_p->perm = PERM::_all;
-        } else {
-          named_cert_p->perm = PERM::_default;
-        }
+        // Nightfall: every paired device gets full permission, not only the
+        // first. Pairing already needs the PIN entered in the admin-only web
+        // UI; upstream's view-only default left later headsets unable to
+        // launch apps or send input, with no way to ask for more.
+        named_cert_p->perm = PERM::_all;
 
         named_cert_p->enable_legacy_ordering = true;
         named_cert_p->allow_client_commands = true;
