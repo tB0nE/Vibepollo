@@ -30,6 +30,10 @@ extern "C" {
 #include "thread_pool.h"
 #include "utility.h"
 
+#ifdef __linux__
+  #include "platform/linux/display_manifest.h"
+#endif
+
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
 constexpr int WHEEL_DELTA = 120;
@@ -640,6 +644,10 @@ namespace input {
     // Windows/macOS apply monitor offsets in platform code, so adding offsets here
     // would double-apply them and clamp input to edges.
 #ifdef __linux__
+    // Monitors packed into rows each sit somewhere else on the desktop.
+    if (touch_port.frame_tiles) {
+      return platf::frame_to_desktop(*touch_port.frame_tiles, x / touch_port.scalar_tpcoords, y / touch_port.scalar_tpcoords);
+    }
     float final_x = (x + touch_port.offset_x * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
     float final_y = (y + touch_port.offset_y * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
 #else

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 // lib includes
@@ -24,6 +25,7 @@ extern "C" {
 #include "cuda.h"
 #include "cuda_interop.h"
 #include "cuda_render_device.h"
+#include "display_manifest.h"
 #include "graphics.h"
 #include "src/logging.h"
 #include "src/nvenc/nvenc_cuda.h"
@@ -31,6 +33,9 @@ extern "C" {
 #include "src/utility.h"
 #include "src/video.h"
 #include "wayland.h"
+#ifdef SUNSHINE_BUILD_X11
+  #include "x11grab.h"
+#endif
 
 #define SUNSHINE_STRINGVIEW_HELPER(x) x##sv
 #define SUNSHINE_STRINGVIEW(x) SUNSHINE_STRINGVIEW_HELPER(x)
@@ -1218,7 +1223,23 @@ namespace cuda {
 
         capture_params.dwSamplingRateMs = 1000 /* ms */ / config.framerate;
 
-        if (streamedMonitor != -1) {
+        std::optional<platf::capture_region_t> region;
+#ifdef SUNSHINE_BUILD_X11
+        region = platf::x11_session_region();
+#endif
+        if (region) {
+          // Several monitors: NvFBC crops their bounding box, or for a packed frame grabs the
+          // whole screen and snapshot() copies each monitor to its tile.
+          width = region->width;
+          height = region->height;
+          offset_x = region->offset_x;
+          offset_y = region->offset_y;
+          frame_tiles = platf::frame_tiles_of(*region);
+          capture_params.eTrackingType = NVFBC_TRACKING_SCREEN;
+          if (frame_tiles.empty()) {
+            capture_params.captureBox = {std::uint32_t(offset_x), std::uint32_t(offset_y), std::uint32_t(width), std::uint32_t(height)};
+          }
+        } else if (streamedMonitor != -1) {
           auto &output = status_params->outputs[streamedMonitor];
 
           width = output.trackedBox.w;
@@ -1403,7 +1424,15 @@ namespace cuda {
         }
         auto img = (img_t *) img_out.get();
 
-        if (img->tex.copy((std::uint8_t *) device_ptr, img->height, img->row_pitch)) {
+        if (!frame_tiles.empty()) {
+          const int screen_pitch = env_width * img->pixel_pitch;
+          for (const auto &tile : frame_tiles) {
+            auto src = (std::uint8_t *) device_ptr + std::size_t(tile.desktop_y) * screen_pitch + std::size_t(tile.desktop_x) * img->pixel_pitch;
+            if (img->tex.copy_rect(src, screen_pitch, tile.frame_x * img->pixel_pitch, tile.frame_y, tile.width * img->pixel_pitch, tile.height)) {
+              return platf::capture_e::error;
+            }
+          }
+        } else if (img->tex.copy((std::uint8_t *) device_ptr, img->height, img->row_pitch)) {
           return platf::capture_e::error;
         }
 

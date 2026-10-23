@@ -6,8 +6,10 @@
 
 // standard includes
 #include <optional>
+#include <string>
 
 // local includes
+#include "display_manifest.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
 
@@ -45,3 +47,17 @@ namespace platf::x11 {
 
   xdisplay_t make_display();
 }  // namespace platf::x11
+
+namespace platf {
+  /**
+   * @brief The X11 region the current session's outputs= selects, for any X11 capture
+   *        backend. Nothing when the session didn't ask or X11 isn't available.
+   */
+  std::optional<capture_region_t> x11_session_region();
+
+  /**
+   * @brief The desktop manifest for `outputs` (empty: what capture uses without outputs=).
+   * @return Nothing when X11 or XRandR isn't available.
+   */
+  std::optional<desktop_manifest_t> x11_query_desktop_manifest(const std::string &outputs);
+}  // namespace platf

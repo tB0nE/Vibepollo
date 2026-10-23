@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -26,6 +27,7 @@
 // local includes
 #include "src/boost_process_shim.h"
 #include "src/config.h"
+#include "src/platform/frame_tile.h"
 #include "src/host_stats_types.h"
 #include "src/logging.h"
 #include "src/thread_safe.h"
@@ -685,6 +687,9 @@ namespace platf {
 
     int width, height;
     int logical_width, logical_height;
+
+    // Set when a multi-monitor frame is packed into rows; empty for a plain crop.
+    std::vector<frame_tile_t> frame_tiles;
 
   protected:
     // collect capture timing data (at loglevel debug)

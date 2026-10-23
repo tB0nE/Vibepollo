@@ -211,6 +211,12 @@ namespace cuda {
     return 0;
   }
 
+  int tex_t::copy_rect(const std::uint8_t *src, int src_pitch, int dst_x_bytes, int dst_y, int width_bytes, int height) {
+    CU_CHECK(cudaMemcpy2DToArray(array, dst_x_bytes, dst_y, src, src_pitch, width_bytes, height, cudaMemcpyDeviceToDevice), "Couldn't copy a tile to cuda array from deviceptr");
+
+    return 0;
+  }
+
   std::optional<tex_t> tex_t::make(int height, int pitch) {
     tex_t tex;
 

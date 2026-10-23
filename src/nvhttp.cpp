@@ -79,8 +79,12 @@
   #include "src/platform/linux/display_backend.h"
   #include "platform/linux/display_power.h"
   #include "platform/linux/private_display_resume_policy.h"
+  #ifdef SUNSHINE_BUILD_X11
+    #include "platform/linux/x11grab.h"
+  #endif
 #endif
 
+#include "capture_outputs.h"
 #include "process.h"
 #include "rtsp.h"
 #include "rtsp_pending_policy.h"
@@ -4217,6 +4221,23 @@ namespace nvhttp {
       }
     }
 
+    /**
+     * @brief Why a launch or resume can't capture the monitors in its outputs= list, if so.
+     *
+     * Several monitors are cropped from the desktop as one rectangle, so they must not
+     * leave out a monitor that lies between them.
+     */
+    std::optional<std::string> capture_outputs_error(const std::string &outputs) {
+#if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
+      if (platf::split_csv(outputs).size() > 1) {
+        if (const auto manifest = platf::x11_query_desktop_manifest(outputs); manifest && !manifest->contiguous) {
+          return "outputs= [" + outputs + "] leaves out a monitor between the ones it names; include it, or pick monitors that sit side by side";
+        }
+      }
+#endif
+      return std::nullopt;
+    }
+
     void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, bool normal_app_transition = true, bool launched_from_applist = false);
     void cancel(resp_https_t response, req_https_t request);
 
@@ -4838,6 +4859,14 @@ namespace nvhttp {
 #endif
       const bool allow_display_changes = true;
       auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+      const auto requested_outputs = get_arg(args, "outputs", "");
+      if (const auto error = capture_outputs_error(requested_outputs)) {
+        BOOST_LOG(warning) << "Rejecting launch: "sv << *error;
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", *error);
+        tree.put("root.gamesession", 0);
+        return;
+      }
       std::optional<std::string> pending_output_override;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override) {
@@ -4847,6 +4876,8 @@ namespace nvhttp {
       no_active_sessions = !has_stream_session_activity();
       if (no_active_sessions) {
         config::set_runtime_output_name_override(std::nullopt);
+        // A viewer joining a running stream can't change what it captures.
+        capture_outputs::set(requested_outputs);
 #if defined(_WIN32) || defined(__linux__)
         stream::cancel_paused_display_cleanup();
 #endif
@@ -5405,6 +5436,17 @@ namespace nvhttp {
     }
 
     auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+    const auto requested_outputs = get_arg(args, "outputs", "");
+    if (const auto error = capture_outputs_error(requested_outputs)) {
+      BOOST_LOG(warning) << "Rejecting resume: "sv << *error;
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", *error);
+      tree.put("root.resume", 0);
+      return;
+    }
+    if (no_active_sessions) {
+      capture_outputs::set(requested_outputs);
+    }
     if (!proc::proc.allow_client_commands || !verified_client->allow_client_commands) {
       launch_session->client_do_cmds.clear();
       launch_session->client_undo_cmds.clear();
@@ -6137,6 +6179,63 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  /**
+   * @brief GET /polaris/v1/display/manifest: where each monitor is in the captured frame.
+   *
+   * Same shape as Nightfall's Polaris fork, so Nightfall can show each monitor as its own
+   * screen and send the ones it wants back as outputs=.
+   */
+  void getDisplayManifest(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto verified_client = get_verified_cert(request);
+    if (!has_client_perm(verified_client, PERM::_allow_view)) {
+      log_permission_denied("DisplayManifest"sv, "View stream"sv, verified_client, true);
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    nlohmann::json output;
+    output["version"] = 1;
+    output["source"] = "host_manifest";
+    output["frame_size"] = {0, 0};
+    output["desktop_bounds"] = {0, 0, 0, 0};
+    output["monitors"] = nlohmann::json::array();
+#if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
+    if (const auto manifest = platf::x11_query_desktop_manifest(capture_outputs::get())) {
+      output["frame_size"] = {manifest->frame_width, manifest->frame_height};
+      output["desktop_bounds"] = {manifest->desktop_x, manifest->desktop_y, manifest->desktop_width, manifest->desktop_height};
+      output["contiguous"] = manifest->contiguous;
+      output["tiled"] = manifest->tiled;
+      for (const auto &m : manifest->monitors) {
+        output["monitors"].push_back({
+          {"id", m.id},
+          {"label", m.label},
+          {"enabled", m.enabled},
+          {"capturable", m.capturable},
+          {"is_primary", m.is_primary},
+          {"frame_rect", {m.frame_x, m.frame_y, m.frame_w, m.frame_h}},
+          {"desktop_rect", {m.desktop_x, m.desktop_y, m.desktop_w, m.desktop_h}},
+          {"hint", nlohmann::json::object()},
+        });
+      }
+    } else
+#endif
+    {
+      // Monitor layouts are X11-only so far. Nightfall treats any JSON answer as a layout,
+      // so answer like a host without this endpoint.
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+    response->close_connection_after_response = true;
+  }
+
   struct pyrowave_probe_state_t {
     resp_https_t response;
     std::size_t remaining;
@@ -6437,6 +6536,7 @@ namespace nvhttp {
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
     https_server.resource["^/bitrate$"]["GET"] = setBitrate;
     https_server.resource["^/api/abr/capabilities$"]["GET"] = getAbrCapabilities;
+    https_server.resource["^/polaris/v1/display/manifest$"]["GET"] = getDisplayManifest;
     https_server.resource["^/pyrowave-bandwidth-probe$"]["GET"] = getPyroWaveBandwidthProbe;
 
     https_server.config.reuse_address = true;

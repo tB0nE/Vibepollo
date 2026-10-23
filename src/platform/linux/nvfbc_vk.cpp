@@ -8,14 +8,19 @@
 #include <chrono>
 #include <cstring>
 #include <dlfcn.h>
+#include <optional>
 #include <thread>
 
 // local includes
+#include "display_manifest.h"
 #include "nvfbc_vk.h"
 
 #include <NvFBC.h>
 #ifdef SUNSHINE_BUILD_VAAPI
   #include "vaapi.h"
+#endif
+#ifdef SUNSHINE_BUILD_X11
+  #include "x11grab.h"
 #endif
 #include "src/logging.h"
 #include "src/utility.h"
@@ -206,7 +211,23 @@ namespace platf {
         params.bPushModel = nv_bool(false);
         params.bAllowDirectCapture = nv_bool(false);
 
-        if (streamed != -1) {
+        std::optional<capture_region_t> region;
+#ifdef SUNSHINE_BUILD_X11
+        region = x11_session_region();
+#endif
+        if (region) {
+          // Several monitors: NvFBC crops their bounding box, or for a packed frame grabs the
+          // whole screen and snapshot() copies each monitor to its tile.
+          width = region->width;
+          height = region->height;
+          offset_x = region->offset_x;
+          offset_y = region->offset_y;
+          frame_tiles = frame_tiles_of(*region);
+          params.eTrackingType = NVFBC_TRACKING_SCREEN;
+          if (frame_tiles.empty()) {
+            params.captureBox = {std::uint32_t(offset_x), std::uint32_t(offset_y), std::uint32_t(width), std::uint32_t(height)};
+          }
+        } else if (streamed != -1) {
           auto &output = status.outputs[streamed];
           width = output.trackedBox.w;
           height = output.trackedBox.h;
@@ -338,7 +359,10 @@ namespace platf {
           return capture_e::error;
         }
         const auto grabbed_at = std::chrono::steady_clock::now();
-        if (static_cast<int>(frame.dwWidth) != width || static_cast<int>(frame.dwHeight) != height) {
+        // A packed frame is copied out of a grab of the whole screen.
+        const int grab_width = frame_tiles.empty() ? width : env_width;
+        const int grab_height = frame_tiles.empty() ? height : env_height;
+        if (static_cast<int>(frame.dwWidth) != grab_width || static_cast<int>(frame.dwHeight) != grab_height) {
           BOOST_LOG(info) << "NvFBC frame size changed to "sv << frame.dwWidth << 'x' << frame.dwHeight << "; reinitializing"sv;
           return capture_e::reinit;
         }
@@ -347,8 +371,31 @@ namespace platf {
           return capture_e::interrupted;
         }
         auto *img = static_cast<nvfbc_vk_img_t *>(img_out.get());
-        const CUresult copied = gpu_only ? driver->fn.cuMemcpyDtoD(img->device_ptr, grabbed, img->bytes) :
-                                           driver->fn.cuMemcpyDtoH(img->data, grabbed, img->bytes);
+        CUresult copied = CUDA_SUCCESS;
+        if (!frame_tiles.empty()) {
+          for (const auto &tile : frame_tiles) {
+            CUDA_MEMCPY2D copy {};
+            copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+            copy.srcDevice = grabbed;
+            copy.srcXInBytes = std::size_t(tile.desktop_x) * 4;
+            copy.srcY = tile.desktop_y;
+            copy.srcPitch = std::size_t(env_width) * 4;
+            copy.dstMemoryType = gpu_only ? CU_MEMORYTYPE_DEVICE : CU_MEMORYTYPE_HOST;
+            copy.dstDevice = img->device_ptr;
+            copy.dstHost = img->data;
+            copy.dstXInBytes = std::size_t(tile.frame_x) * 4;
+            copy.dstY = tile.frame_y;
+            copy.dstPitch = img->row_pitch;
+            copy.WidthInBytes = std::size_t(tile.width) * 4;
+            copy.Height = tile.height;
+            if ((copied = driver->fn.cuMemcpy2D(&copy)) != CUDA_SUCCESS) {
+              break;
+            }
+          }
+        } else {
+          copied = gpu_only ? driver->fn.cuMemcpyDtoD(img->device_ptr, grabbed, img->bytes) :
+                              driver->fn.cuMemcpyDtoH(img->data, grabbed, img->bytes);
+        }
         // NvFBC reuses its buffer on the next grab; the copy must be finished first.
         if (copied != CUDA_SUCCESS || driver->fn.cuStreamSynchronize(nullptr) != CUDA_SUCCESS) {
           BOOST_LOG(error) << "NvFBC capture: frame copy failed: "sv << linux_cuda::describe(*driver, copied);

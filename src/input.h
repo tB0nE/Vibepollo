@@ -6,6 +6,7 @@
 
 // standard includes
 #include <functional>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -50,6 +51,9 @@ namespace input {
 
     int env_logical_width;
     int env_logical_height;
+
+    // The display's tiles when several monitors are packed into rows; null otherwise.
+    std::shared_ptr<const std::vector<platf::frame_tile_t>> frame_tiles;
 
     explicit operator bool() const {
       return width != 0 && height != 0 && env_width != 0 && env_height != 0;
