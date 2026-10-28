@@ -18,6 +18,40 @@ Nightfall Meteor. Existing Sunshine-compatible external hosts remain supported.
   Its source history was shallow at creation, matching the source checkout;
   upstream history can be fetched later when needed.
 
+## Current multi-monitor integration checkpoint (2026-10-28)
+
+The portable host packaging and capture-aware automatic encoder selection are
+implemented. Published preview.2 uses source `382bf6a`. The old failure notes and
+original milestone list below are historical, not the current work queue.
+
+Restored the later work from the original checkout's `nightfall` branch:
+
+- `3ae53454df8254c8b4903d6ddb2bedc8bce5a969` → `6a574f0`:
+  X11 multi-monitor capture and the Polaris-compatible display manifest API.
+- `0f7878565f2357f17f88c9be688ff2b69d0ccc9e` → `ea94a2b`:
+  full host permissions for each newly approved paired client. Existing disabled
+  clients retain the upstream behavior. This is a host authorization policy;
+  it does not grant Linux device access or replace Meteor's uinput setup.
+
+The imports applied cleanly and retain their original authorship plus
+cherry-pick provenance. Capture-aware NVENC selection remains present.
+Twenty-seven focused tests pass: 14 monitor geometry/packing/input-mapping
+cases and 13 NVENC API/selection cases. They do not access live displays or GPUs.
+
+The monitor feature selects outputs through `outputs=` on launch/resume and
+reports their positions through `/polaris/v1/display/manifest`. Selected monitors
+share one encoded frame; Nightfall splits that frame into screen views. Oversized
+layouts can be packed into rows and pointer coordinates map back to the desktop.
+It does not create virtual monitors, offer independent per-monitor streams, or
+implement Wayland multi-monitor capture. Real multi-monitor streaming is still
+an acceptance item before this is promoted into Meteor's pinned host download.
+
+Build using `packaging/meteor/build-release.sh` (Release, Ubuntu 22.04 container).
+Stage development packages with `METEOR_HOST_VERSION=0.1.0-preview.3-dev` passed
+into the package-release container. Do not overwrite preview.2 artifacts or claim
+the published release contains these imports. Keep real desktop layouts intact
+while testing; synthetic geometry tests cover layouts without changing xrandr.
+
 ## Existing executable is a separate checkpoint
 
 The existing `Vibepollo/build-cuda/vibepollo-2.0.0` executable reports source
@@ -64,7 +98,7 @@ paths. Consult Nightfall's `docs/plans/active/meteor-bundled-host.md` for the
 self-contained Ubuntu 22.04 packaging goal, runtime-library isolation and capture
 backend requirements.
 
-## Current test failure and next work
+## Historical initial test failure and original milestones
 
 The PC uses an AMD RX480 for its X11 desktop and an NVIDIA RTX3090 for offload.
 The previously working external host explicitly selects:
@@ -82,13 +116,13 @@ configuration was changed locally to the two explicit compatibility settings
 above for the next test; no successful stream after that change is claimed here.
 Do not make them universal defaults or silently fall back on every machine.
 
-The running managed host still references the original development executable.
+At the initial handoff, the managed host still referenced the original development executable.
 Changing that path to a fresh build from this checkout is a separate deliberate
 step after build validation. The original host checkout/configuration and monitor
 layout must remain intact. Do not add file capabilities or change firewall or
 network configuration without explaining the change first.
 
-Next milestones:
+Original milestones (subsequently completed or superseded as described above):
 
 1. Rebuild this exact source baseline in a new release build directory and
    compare it with the existing executable, including mixed-GPU capture/encode.
