@@ -3,7 +3,7 @@
 from pathlib import Path
 import hashlib,json,os,subprocess,tarfile,io
 ROOT=Path(__file__).resolve().parents[2]
-version=os.environ.get('METEOR_HOST_VERSION','0.1.0-preview.1')
+version=os.environ.get('METEOR_HOST_VERSION','0.1.0-preview.2')
 out=ROOT/'.build-cache/meteor-host-release';out.mkdir(parents=True,exist_ok=True)
 archive=out/f'Meteor-Vibepollo-{version}-sources.tar.zst'
 files=[];revisions={};omitted=[]

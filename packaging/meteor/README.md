@@ -23,7 +23,7 @@ Docker base tags and Ubuntu package updates can change over time: package metada
 records the dependency versions; this is not a byte-for-byte reproducible build claim.
 
 Outputs are under `.build-cache/meteor-host-release/`. Archive version
-`0.1.0-preview.1` identifies the Meteor packaging release; the inherited host's
+`0.1.0-preview.2` identifies the Meteor packaging release; the inherited host's
 internal version remains Vibepollo 2.0.0 with the source commit in `--version`.
 The archive contains `bin/meteor-vibepollo`, `bin/vibepollo`, `lib/`,
 `share/vibepollo/`, notices and a per-file manifest. Meteor verifies its pinned
@@ -58,3 +58,15 @@ uninitialized platform submodules are listed explicitly rather than silently
 presented as included. Network access is still needed for the container/toolchain
 and pinned FFmpeg binary input; its build scripts and corresponding codec source
 are included for rebuilding that dependency separately.
+
+### Automatic encoder selection follow-up
+
+Automatic native NVENC selection validates the actual desktop capture/conversion
+device before advertising the encoder. A successful synthetic CUDA encode alone
+is insufficient on mixed-GPU desktops. If the real path fails validation, normal
+selection continues to FFmpeg NVENC and other candidates such as VA-API. This
+changes selection, not the per-frame encoding workload. Explicit native NVENC
+selection retains its encoder-only capability probe and fail-closed behavior.
+The capture-aware fix was accepted on the AMD-display/NVIDIA-encoder test PC
+and is included from preview.2. The first preview does not contain it. Other
+GPU/desktop combinations still require acceptance testing.

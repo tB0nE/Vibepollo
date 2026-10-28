@@ -4,7 +4,7 @@ from pathlib import Path
 import hashlib,json,os,re,shutil,subprocess,sys
 ROOT=Path(__file__).resolve().parents[2]
 build=ROOT/'build-meteor-release'
-version=os.environ.get('METEOR_HOST_VERSION','0.1.0-preview.1')
+version=os.environ.get('METEOR_HOST_VERSION','0.1.0-preview.2')
 if not re.fullmatch(r'[0-9A-Za-z.-]+',version):raise SystemExit('Invalid release version')
 out=ROOT/'.build-cache/meteor-host-release'
 stage=out/('Meteor-Vibepollo-'+version+'-linux-x86_64')
