@@ -30,8 +30,8 @@ Existing executable SHA-256:
 
 The existing executable and build directories remain in the original checkout
 for comparison. No host binary, account state, pairing keys, credentials or
-user configuration is committed here. This source checkpoint has not yet been
-rebuilt or deployed. Branding within the application is also still upstream;
+user configuration is committed here. The initial baseline was not rebuilt or deployed. Subsequent portable-release
+work is described in `packaging/meteor/README.md`. Branding within the application is still upstream;
 this document establishes the development baseline, not a finished product fork.
 
 ## Initialize and build

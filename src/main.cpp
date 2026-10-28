@@ -320,7 +320,7 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-#ifdef SUNSHINE_BUILD_STEAMOS
+#if defined(SUNSHINE_BUILD_STEAMOS) || defined(SUNSHINE_BUILD_METEOR)
   // Resolve assets from the executable's release, including launches outside
   // the wrapper and upgrades which switch the "current" symlink underneath us.
   std::error_code bundle_error;

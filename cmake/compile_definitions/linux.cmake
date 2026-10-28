@@ -1,3 +1,7 @@
+if(SUNSHINE_BUILD_METEOR)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_METEOR=1)
+endif()
+
 # linux specific compile definitions
 
 if(FREEBSD)

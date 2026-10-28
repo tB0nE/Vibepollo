@@ -65,7 +65,7 @@ include(${CMAKE_MODULE_PATH}/dependencies/libvirtualdisplay_source.cmake)
 
 # Native Linux package templates need this value before dependency targets are
 # added. Keep it in the cache so libvirtualdisplay sees the same decision.
-if(SUNSHINE_BUILD_STEAMOS)
+if(SUNSHINE_BUILD_STEAMOS OR SUNSHINE_BUILD_METEOR)
     set(BUILD_VIBESHINE_KWIN_GPU_BRIDGE OFF CACHE BOOL
             "Build the Vibepollo KWin GPU-association bridge" FORCE)
 else()

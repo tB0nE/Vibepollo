@@ -21,8 +21,10 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/libdisplaydevice")
 
 # libvirtualdisplay
 include(dependencies/libvirtualdisplay_source)
-set(BUILD_VIBESHINE_KWIN_GPU_BRIDGE ON CACHE BOOL
-        "Build the bundled libvirtualdisplay KWin GPU-association bridge" FORCE)
+if(NOT SUNSHINE_BUILD_METEOR AND NOT SUNSHINE_BUILD_STEAMOS)
+    set(BUILD_VIBESHINE_KWIN_GPU_BRIDGE ON CACHE BOOL
+            "Build the bundled libvirtualdisplay KWin GPU-association bridge" FORCE)
+endif()
 add_subdirectory("${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/third-party/libvirtualdisplay")
 
 # common dependencies

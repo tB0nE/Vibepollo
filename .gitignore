@@ -80,3 +80,5 @@ vibeshine_state.json
 
 # Local CMake build trees for Meteor-Vibepollo development.
 /build-*/
+
+/.build-cache/
