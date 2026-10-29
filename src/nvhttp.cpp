@@ -73,12 +73,16 @@
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
+  #include "platform/linux/display_manifest.h"
   #include "platform/linux/private_display.h"
   #include "platform/linux/routed_link.h"
   #include "platform/linux/mangohud_policy.h"
   #include "src/platform/linux/display_backend.h"
   #include "platform/linux/display_power.h"
   #include "platform/linux/private_display_resume_policy.h"
+  #ifdef SUNSHINE_BUILD_KWIN
+    #include "platform/linux/kwin_workspace.h"
+  #endif
   #ifdef SUNSHINE_BUILD_X11
     #include "platform/linux/x11grab.h"
   #endif
@@ -4229,6 +4233,11 @@ namespace nvhttp {
         }
       }
 #endif
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      if (const auto error = platf::kwin_workspace_selection_error(outputs)) {
+        return error;
+      }
+#endif
       return std::nullopt;
     }
 
@@ -6196,8 +6205,17 @@ namespace nvhttp {
     output["frame_size"] = {0, 0};
     output["desktop_bounds"] = {0, 0, 0, 0};
     output["monitors"] = nlohmann::json::array();
-#if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
-    if (const auto manifest = platf::x11_query_desktop_manifest(capture_outputs::get())) {
+#if defined(__linux__)
+    std::optional<platf::desktop_manifest_t> manifest;
+  #ifdef SUNSHINE_BUILD_KWIN
+    manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+  #endif
+  #ifdef SUNSHINE_BUILD_X11
+    if (!manifest) {
+      manifest = platf::x11_query_desktop_manifest(capture_outputs::get());
+    }
+  #endif
+    if (manifest) {
       output["frame_size"] = {manifest->frame_width, manifest->frame_height};
       output["desktop_bounds"] = {manifest->desktop_x, manifest->desktop_y, manifest->desktop_width, manifest->desktop_height};
       output["contiguous"] = manifest->contiguous;
@@ -6217,8 +6235,8 @@ namespace nvhttp {
     } else
 #endif
     {
-      // Monitor layouts are X11-only so far. Nightfall treats any JSON answer as a layout,
-      // so answer like a host without this endpoint.
+      // Return no layout when capture cannot honor it. In particular, XWayland's
+      // geometry must not stand in for an unsupported Wayland compositor.
       response->write(SimpleWeb::StatusCode::client_error_not_found);
       response->close_connection_after_response = true;
       return;

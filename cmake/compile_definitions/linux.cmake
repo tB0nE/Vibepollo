@@ -261,6 +261,11 @@ if(PIPEWIRE_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire.cpp")
 endif()
 
+# KDE output metadata is shared by portal and direct KWin capture.
+if(SUNSHINE_ENABLE_PORTAL OR SUNSHINE_ENABLE_KWIN)
+    list(APPEND PLATFORM_TARGET_FILES "${CMAKE_SOURCE_DIR}/src/platform/linux/kscreen_doctor_parser.cpp")
+endif()
+
 # XDG portal
 if(SUNSHINE_ENABLE_GAMESCOPE)
     if(NOT WAYLAND_FOUND OR NOT PIPEWIRE_FOUND)

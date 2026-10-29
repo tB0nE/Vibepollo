@@ -136,3 +136,47 @@ Original milestones (subsequently completed or superseded as described above):
    retrieval flow in the tray.
 5. Validate discovery, input/audio, restart/reconnect, external-host coexistence
    and clean-machine setup. Windows and environment-design work are deferred.
+
+## Wayland multi-monitor reuse (2026-10-28)
+
+Polaris source `7f6c2b6` contains KDE Full workspace capture, subset cropping,
+logical pointer calibration and reconnect fixes (notably `da37cde`). Its old
+Wayland plan predates those changes. Do not import the old N-source wait loop.
+
+The KDE output parser and scale metadata are now ported as a foundation, with
+per-output type validation and eight parser tests. Together with existing
+geometry and NVENC policy coverage, 35 focused tests pass. The parser is built
+but not yet called by the capture path; this does not enable Wayland multi-monitor.
+
+Next: shared negotiated-buffer geometry and pointer mapping, then adapt the
+existing portal/PipeWire capture path, manifest and reconnect lifecycle together.
+The full plan is in Nightfall `docs/plans/active/meteor-wayland-multi-monitor.md`.
+No EVDI changes, display reconfiguration, deployment or host release were made.
+
+### Native KWin workspace implementation
+
+The initial Wayland capture implementation now uses KWin `stream_region`
+(version >= 3) at scale 1.0 through the existing PipeWire/encoder backend.
+It follows Polaris's one-workspace strategy without copying its capture
+engine or adding per-frame CPU cropping. XDG output supplies logical monitor
+geometry directly, so kscreen-doctor is not a runtime dependency.
+
+Shared `wayland_workspace.h` geometry drives capture, manifest and input.
+Automatic KDE capture prefers KWin before portal probing. Explicit selections
+are checked before launch/resume; unknown names, unsupported backends,
+non-contiguous crops and oversized layouts fail rather than capture a fallback.
+The manifest preserves `host_manifest`; negotiated size must match exactly.
+Private-display physical capture remains on its existing path.
+
+Validation: Release build passes; 44 focused tests pass (including nine new
+workspace cases). In a temporary headless KWin session with two virtual outputs,
+the host enumerated both and negotiated its single-output workspace region
+at 640x360 using PipeWire memory buffers. This is initialization coverage,
+not acceptance of a two-monitor Nightfall stream or GPU performance.
+Reports: `.build-cache/meteor-host-release/wayland-smoke/summary.json` and
+`test-build/wayland-workspace-results.json`.
+
+No live desktop reconfiguration, deployment or publication was performed.
+Outstanding: real KDE client stream/input/reconnect testing, oversized GPU
+packing, and non-KDE portal multi-output support. Virtual-output creation is
+outside this port. See the Nightfall plan for the acceptance checklist.

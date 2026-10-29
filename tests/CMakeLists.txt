@@ -529,6 +529,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     sunshine_register_component(NAME test_component_linux_kmsgrab_selection TEST_SOURCE unit/platform/linux/test_kmsgrab_selection.cpp
         LINK_LIBRARIES sunshine_libvirtualdisplay_uapi)
     sunshine_register_component(NAME test_component_linux_kmsgrab_framebuffer TEST_SOURCE unit/platform/linux/test_kmsgrab_framebuffer.cpp)
+    sunshine_register_component(NAME test_component_linux_kscreen_doctor_parser
+        TEST_SOURCE unit/platform/linux/test_kscreen_doctor_parser.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/linux/kscreen_doctor_parser.cpp"
+        LINK_LIBRARIES nlohmann_json::nlohmann_json)
+    sunshine_register_component(NAME test_component_linux_wayland_workspace TEST_SOURCE unit/platform/linux/test_wayland_workspace.cpp)
     sunshine_register_component(NAME test_component_linux_display_manifest TEST_SOURCE unit/platform/linux/test_display_manifest.cpp)
     sunshine_register_component(NAME test_component_linux_private_display_cleanup_policy TEST_SOURCE unit/platform/linux/test_private_display_cleanup_policy.cpp)
     sunshine_register_component(NAME test_component_linux_render_device TEST_SOURCE unit/platform/linux/test_render_device.cpp)

@@ -53,6 +53,8 @@
 
 // local includes
 #include "graphics.h"
+#include "wayland_workspace.h"
+#include "src/capture_outputs.h"
 #include "misc.h"
 #ifdef SUNSHINE_BUILD_NVFBC_VK
   #include "nvfbc_vk.h"
@@ -1438,6 +1440,15 @@ namespace platf {
     const std::optional<adapter_id_t> &required_adapter
   ) {
     (void) required_adapter;
+#ifdef SUNSHINE_BUILD_KWIN
+    if (use_kwin_workspace(window_system == window_system_e::WAYLAND,
+          config::video.capture, capture_outputs::get())) {
+      // KWin supplies all selected monitors in one native region stream. Never
+      // let the generic single-output portal fallback consume this request.
+      BOOST_LOG(info) << "Screencasting selected monitors with KWin workspace capture"sv;
+      return kwin_display(hwdevice_type, requested_display_name, config);
+    }
+#endif
     auto display_name = requested_display_name;
 #ifdef __linux__
     display_name = linux_display::backend().capture_target(requested_display_name);
@@ -1608,14 +1619,14 @@ namespace platf {
 #else
     bool native_compositor_selected = false;
 #endif
-#if defined(SUNSHINE_BUILD_STEAMOS) && defined(SUNSHINE_BUILD_KWIN)
-    // Desktop Mode provides KWin's native screencast interface. Select it
+#ifdef SUNSHINE_BUILD_KWIN
+    // KDE provides KWin's native screencast interface. Select it
     // before portal enumeration, which can open an interactive consent dialog.
     // Gaming Mode keeps the Gamescope backend selected above.
     if (config::video.capture.empty() && sources.none() && verify_kwin()) {
       sources[source::KWIN] = true;
       native_compositor_selected = true;
-      BOOST_LOG(info) << "Using KWin compositor capture for SteamOS Desktop Mode."sv;
+      BOOST_LOG(info) << "Using KWin compositor capture for KDE Wayland."sv;
     }
 #endif
 #if defined(SUNSHINE_BUILD_NVFBC_VK) && !defined(SUNSHINE_BUILD_CUDA)

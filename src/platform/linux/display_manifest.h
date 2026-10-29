@@ -41,6 +41,8 @@ namespace platf {
     /// False for a connected output that isn't showing anything (no CRTC): it is listed in
     /// the manifest but can't be captured.
     bool capturable = true;
+    /// Wayland mode size divided by scale gives compositor-logical size; X11 stays 1.0.
+    double scale = 1.0;
   };
 
   /**

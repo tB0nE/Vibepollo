@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 
 // lib includes
 #include <pipewire/pipewire.h>
@@ -33,6 +34,9 @@
 // local includes
 #include "cuda.h"
 #include "graphics.h"
+#include "kwin_workspace.h"
+#include "wayland_workspace.h"
+#include "src/capture_outputs.h"
 #include "pipewire.cpp"
 #include "private_display.h"
 #include "private_display_capture_policy.h"
@@ -338,7 +342,7 @@ namespace kwin {
         sorted_outputs.emplace_back(output_parameter);
       }
       std::ranges::sort(sorted_outputs, [](const auto &a, const auto &b) {
-        return a->order < b->order || a->pos_x < b->pos_x || a->pos_y < b->pos_y;
+        return std::tie(a->order, a->pos_x, a->pos_y, a->name) < std::tie(b->order, b->pos_x, b->pos_y, b->name);
       });
       std::vector<std::string> output_names;
       for (const auto &output_parameter : sorted_outputs) {
@@ -366,7 +370,16 @@ namespace kwin {
      * @return 0 on success, -1 on failure. On success, node_id and
      *         output width/height/x/y are populated.
      */
-    int start(const std::string_view &output_name) {
+    bool supports_workspace() const {
+      return kde_screencast_v1_ &&
+        wl_proxy_get_version(reinterpret_cast<wl_proxy *>(kde_screencast_v1_)) >= 3;
+    }
+
+    int start(const std::string_view &output_name, const std::optional<platf::wayland_workspace_t> &workspace = std::nullopt) {
+      if (workspace && !supports_workspace()) {
+        BOOST_LOG(error) << "[kwingrab] Multi-monitor capture requires KWin stream_region v3"sv;
+        return -1;
+      }
       // Try find correct output by name
       if (outputs.empty()) {
         BOOST_LOG(error) << "[kwingrab] no wl_output found"sv;
@@ -383,14 +396,31 @@ namespace kwin {
       }
       // Fall back to first element from the map in case of error
       if (!output || !out_params) {
-        const auto output_ = outputs.begin();
+        const auto ordered = get_output_names();
+        const auto preferred = std::find_if(outputs.begin(), outputs.end(), [&](const auto &entry) {
+          return !ordered.empty() && entry.second->name == ordered.front();
+        });
+        const auto output_ = preferred == outputs.end() ? outputs.begin() : preferred;
         output = output_->first;
         out_params = output_->second;
       }
 
       // Request a stream for the chosen output with embedded cursor
       if (kde_screencast_v1_) {
-        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+        if (workspace) {
+          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_region(
+            kde_screencast_v1_, workspace->capture_x, workspace->capture_y,
+            workspace->manifest.frame_width, workspace->manifest.frame_height,
+            wl_fixed_from_double(1.0), ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+          out_params = std::make_shared<output_parameter_t>();
+          out_params->name = "Nightfall workspace";
+          out_params->pos_x = workspace->capture_x;
+          out_params->pos_y = workspace->capture_y;
+          out_params->width = workspace->manifest.frame_width;
+          out_params->height = workspace->manifest.frame_height;
+        } else {
+          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+        }
         zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
       } else {
         // No screencast protocol found. Output an error based on newly initialized permission file.
@@ -632,6 +662,27 @@ namespace kwin {
     };
   };
 
+  std::optional<platf::wayland_workspace_t> workspace_layout(
+    screencast_t &screencast, const std::vector<std::string> &selected
+  ) {
+    const auto order = screencast.get_output_names();
+    const auto monitors = wl::monitors();
+    std::vector<platf::output_descriptor_t> outputs;
+    for (const auto &name : order) {
+      const auto match = std::find_if(monitors.begin(), monitors.end(), [&](const auto &monitor) {
+        return monitor->name == name;
+      });
+      if (match == monitors.end()) {
+        // Partial geometry cannot describe the whole desktop's input extent safely.
+        return std::nullopt;
+      }
+      const auto &viewport = (*match)->viewport;
+      outputs.push_back({name, viewport.offset_x, viewport.offset_y,
+        viewport.logical_width, viewport.logical_height, outputs.empty(), true});
+    }
+    return platf::make_wayland_workspace(outputs, selected);
+  }
+
   /**
    * Display backend
    *
@@ -644,7 +695,24 @@ namespace kwin {
       if (screencast->init(true) < 0) {
         return -1;
       }
-      if (screencast->start(display_name) < 0) {
+      auto selected = platf::split_csv(capture_outputs::get());
+      const bool explicit_selection = !selected.empty();
+      if (selected.empty() && !platf::linux_private_display::is_private_output(display_name)) {
+        auto name = display_name;
+        const auto names = screencast->get_output_names();
+        if (name.empty() && !names.empty()) {
+          name = names.front();
+        }
+        selected.push_back(name);
+      }
+      if (!selected.empty()) {
+        workspace = workspace_layout(*screencast, selected);
+        if (!workspace && explicit_selection) {
+          BOOST_LOG(error) << "[kwingrab] Invalid, incomplete or oversized multi-monitor selection"sv;
+          return -1;
+        }
+      }
+      if (screencast->start(display_name, workspace) < 0) {
         return -1;
       }
       if (screencast->out_params) {
@@ -659,11 +727,43 @@ namespace kwin {
         this->height = screencast->out_params->height;
         this->logical_width = 0;  // Explicitly mark for pipewire_display_t to try to figure this out.
         this->logical_height = 0;  // Explicitly Mark for pipewire_display_t to try to figure this out.
+        if (workspace) {
+          apply_workspace_input();
+        }
         return 0;
       }
       return -1;
     }
 
+    int init(platf::mem_type_e type, const std::string &name, const video::config_t &config) {
+      if (pipewire_display_t::init(type, name, config)) {
+        return -1;
+      }
+      if (workspace && !platf::wayland_workspace_buffer_matches(*workspace, width, height)) {
+        BOOST_LOG(error) << "[kwingrab] Workspace PipeWire size disagrees with logical monitor layout"sv;
+        return -1;
+      }
+      return 0;
+    }
+
+    void verify_and_update_display_parameters() override {
+      if (workspace) {
+        apply_workspace_input();
+      } else {
+        pipewire_display_t::verify_and_update_display_parameters();
+      }
+    }
+
+    void apply_workspace_input() {
+      offset_x = workspace->input_x;
+      offset_y = workspace->input_y;
+      logical_width = workspace->manifest.frame_width;
+      logical_height = workspace->manifest.frame_height;
+      env_width = env_logical_width = workspace->manifest.desktop_width;
+      env_height = env_logical_height = workspace->manifest.desktop_height;
+    }
+
+    std::optional<platf::wayland_workspace_t> workspace;
     std::unique_ptr<screencast_t> screencast;
   };
 }  // namespace kwin
@@ -682,6 +782,45 @@ namespace platf {
     }
 
     return display;
+  }
+
+  std::optional<desktop_manifest_t> kwin_query_desktop_manifest(const std::string &outputs) {
+    if (window_system != window_system_e::WAYLAND ||
+        (!config::video.capture.empty() && config::video.capture != "kwin")) {
+      return std::nullopt;
+    }
+    kwin::screencast_t screencast;
+    if (screencast.init(false) < 0 || !screencast.kwin_available() || !screencast.supports_workspace()) {
+      return std::nullopt;
+    }
+    auto selected = split_csv(outputs);
+    if (selected.empty()) {
+      const auto names = screencast.get_output_names();
+      auto name = config::get_active_output_name();
+      if (linux_private_display::is_private_output(name)) {
+        // Private displays retain their existing physical-resolution capture path.
+        return std::nullopt;
+      }
+      if (name.empty() && !names.empty()) {
+        name = names.front();
+      }
+      selected.push_back(name);
+    }
+    const auto workspace = kwin::workspace_layout(screencast, selected);
+    return workspace ? std::optional(workspace->manifest) : std::nullopt;
+  }
+
+  std::optional<std::string> kwin_workspace_selection_error(const std::string &outputs) {
+    if (window_system != window_system_e::WAYLAND || split_csv(outputs).empty()) {
+      return std::nullopt;
+    }
+    if (!config::video.capture.empty() && config::video.capture != "kwin") {
+      return "Wayland outputs= selection currently requires automatic or KWin capture";
+    }
+    if (!kwin_query_desktop_manifest(outputs)) {
+      return "Wayland outputs= selection needs KWin region capture, valid adjacent outputs and a layout within decoder limits";
+    }
+    return std::nullopt;
   }
 
   std::vector<std::string> kwin_display_names() {
