@@ -377,6 +377,8 @@ function(sunshine_register_component)
     )
 endfunction()
 
+sunshine_register_component(NAME test_component_startup_ping_wait TEST_SOURCE unit/test_startup_ping_wait.cpp)
+sunshine_register_component(NAME test_component_meteor_cursor_scale TEST_SOURCE unit/test_meteor_cursor_scale.cpp)
 sunshine_register_component(NAME test_component_stream_protocol TEST_SOURCE unit/test_stream.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_protocol.cpp")
 sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/test_remote_session.cpp

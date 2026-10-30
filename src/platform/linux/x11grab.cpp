@@ -27,6 +27,7 @@
 #include "src/config.h"
 #include "src/globals.h"
 #include "src/logging.h"
+#include "src/meteor_cursor_scale.h"
 #include "src/platform/common.h"
 #include "src/task_pool.h"
 #include "src/video.h"
@@ -328,45 +329,10 @@ namespace platf {
       return;
     }
 
-    overlay->x -= overlay->xhot;
-    overlay->y -= overlay->yhot;
-
-    overlay->x -= offsetX;
-    overlay->y -= offsetY;
-
-    overlay->x = std::max((short) 0, overlay->x);
-    overlay->y = std::max((short) 0, overlay->y);
-
-    auto pixels = (int *) img.data;
-
-    auto screen_height = img.height;
-    auto screen_width = img.width;
-
-    auto delta_height = std::min<uint16_t>(overlay->height, std::max(0, screen_height - overlay->y));
-    auto delta_width = std::min<uint16_t>(overlay->width, std::max(0, screen_width - overlay->x));
-    for (auto y = 0; y < delta_height; ++y) {
-      auto overlay_begin = &overlay->pixels[y * overlay->width];
-      auto overlay_end = &overlay->pixels[y * overlay->width + delta_width];
-
-      auto pixels_begin = &pixels[(y + overlay->y) * (img.row_pitch / img.pixel_pitch) + overlay->x];
-
-      std::for_each(overlay_begin, overlay_end, [&](long pixel) {
-        int *pixel_p = (int *) &pixel;
-
-        auto colors_in = (uint8_t *) pixels_begin;
-
-        auto alpha = (*(uint *) pixel_p) >> 24u;
-        if (alpha == 255) {
-          *pixels_begin = *pixel_p;
-        } else {
-          auto colors_out = (uint8_t *) pixel_p;
-          colors_in[0] = colors_out[0] + (colors_in[0] * (255 - alpha) + 255 / 2) / 255;
-          colors_in[1] = colors_out[1] + (colors_in[1] * (255 - alpha) + 255 / 2) / 255;
-          colors_in[2] = colors_out[2] + (colors_in[2] * (255 - alpha) + 255 / 2) / 255;
-        }
-        ++pixels_begin;
-      });
-    }
+    meteor_cursor::blend(img.data, img.width, img.height, img.row_pitch,
+                         overlay->pixels, overlay->width, overlay->height,
+                         overlay->x - offsetX, overlay->y - offsetY,
+                         overlay->xhot, overlay->yhot, meteor_cursor::current_scale());
   }
 
   /**
@@ -431,7 +397,10 @@ namespace platf {
    * @brief The region the session's outputs= selects, or nothing when it didn't ask.
    */
   static std::optional<capture_region_t> session_region(Display *xdisplay, Window xwindow, const XWindowAttributes &xattr) {
-    const auto only = split_csv(capture_outputs::get());
+    const auto available = connected_outputs(xdisplay, xwindow);
+    const auto only = split_csv(capture_outputs::initial_selection(
+      capture_outputs::get(), config::get_active_output_name(),
+      std::getenv("METEOR_DEFAULT_PRIMARY_OUTPUT") != nullptr, available));
     if (only.empty()) {
       return std::nullopt;
     }
@@ -464,8 +433,8 @@ namespace platf {
     if (!c) {
       return;
     }
-    const int x = c->x - c->xhot;
-    const int y = c->y - c->yhot;
+    const int x = c->x;
+    const int y = c->y;
     for (const auto &tile : tiles) {
       if (x >= tile.desktop_x && x < tile.desktop_x + tile.width && y >= tile.desktop_y && y < tile.desktop_y + tile.height) {
         blend_cursor(display, img, tile.desktop_x - tile.frame_x, tile.desktop_y - tile.frame_y);
@@ -1014,7 +983,10 @@ namespace platf {
     XWindowAttributes xattr {};
     x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr);
 
-    auto only = split_csv(outputs);
+    const auto available = connected_outputs(xdisplay.get(), xwindow);
+    auto only = split_csv(capture_outputs::initial_selection(
+      outputs, config::get_active_output_name(),
+      std::getenv("METEOR_DEFAULT_PRIMARY_OUTPUT") != nullptr, available));
     if (only.empty()) {
       // What capture uses without outputs=: output_name's monitor, else the whole desktop.
       const auto name = config::get_active_output_name();
@@ -1081,6 +1053,8 @@ namespace platf {
 
       xcursor_t xcursor = fix::GetCursorImage(display);
 
+      if (!xcursor) return;
+      const int scale = meteor_cursor::current_scale();
       if (img.serial != xcursor->cursor_serial) {
         auto buf_size = xcursor->width * xcursor->height * sizeof(int);
 
@@ -1094,12 +1068,14 @@ namespace platf {
       }
 
       img.data = img.buffer.data();
-      img.width = img.src_w = xcursor->width;
-      img.height = img.src_h = xcursor->height;
-      img.x = xcursor->x - xcursor->xhot;
-      img.y = xcursor->y - xcursor->yhot;
+      img.src_w = xcursor->width;
+      img.src_h = xcursor->height;
+      img.width = img.src_w * scale;
+      img.height = img.src_h * scale;
+      img.x = xcursor->x - xcursor->xhot * scale;
+      img.y = xcursor->y - xcursor->yhot * scale;
       img.pixel_pitch = 4;
-      img.row_pitch = img.pixel_pitch * img.width;
+      img.row_pitch = img.pixel_pitch * img.src_w;
       img.serial = xcursor->cursor_serial;
     }
 
