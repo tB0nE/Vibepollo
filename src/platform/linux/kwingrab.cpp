@@ -405,13 +405,17 @@ namespace kwin {
         out_params = output_->second;
       }
 
-      // Request a stream for the chosen output with embedded cursor
+      // Meteor composites the cursor separately so scaling never changes KDE's
+      // desktop cursor. Non-Meteor hosts retain embedded-cursor capture.
+      const bool cursor_metadata = [] { const char *p = std::getenv("METEOR_CURSOR_SCALE_FILE"); return p && *p; }();
+      const auto pointer_mode = cursor_metadata ? ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_METADATA : ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED;
+      BOOST_LOG(info) << "[kwingrab] Cursor: " << (cursor_metadata ? "PipeWire metadata (stream-only scaling)" : "embedded");
       if (kde_screencast_v1_) {
         if (workspace) {
           kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_region(
             kde_screencast_v1_, workspace->capture_x, workspace->capture_y,
             workspace->manifest.frame_width, workspace->manifest.frame_height,
-            wl_fixed_from_double(1.0), ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+            wl_fixed_from_double(1.0), pointer_mode);
           out_params = std::make_shared<output_parameter_t>();
           out_params->name = "Nightfall workspace";
           out_params->pos_x = workspace->capture_x;
@@ -419,7 +423,7 @@ namespace kwin {
           out_params->width = workspace->manifest.frame_width;
           out_params->height = workspace->manifest.frame_height;
         } else {
-          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
+          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, pointer_mode);
         }
         zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
       } else {
@@ -712,6 +716,8 @@ namespace kwin {
           return -1;
         }
       }
+      const char *cursor_control = std::getenv("METEOR_CURSOR_SCALE_FILE");
+      pipewire.set_cursor_metadata(cursor_control && *cursor_control);
       if (screencast->start(display_name, workspace) < 0) {
         return -1;
       }

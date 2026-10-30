@@ -15,11 +15,11 @@ inline int read_scale(const std::string &path) {
   file >> std::ws;
   return file.eof() ? scale : 1;
 }
-inline int current_scale() {
+inline int current_scale(const char *backend = "x11-cursor-scale-v1") {
   static const std::string path = [] { auto p = std::getenv("METEOR_CURSOR_SCALE_FILE"); return p ? std::string(p) : std::string(); }();
   if (path.empty()) return 1;
   static std::once_flag announced;
-  std::call_once(announced, [&] { std::ofstream(path + ".supported") << "x11-cursor-scale-v1\n"; });
+  std::call_once(announced, [&] { std::ofstream(path + ".supported") << backend << "\n"; });
   thread_local int cached = 1;
   thread_local auto next = std::chrono::steady_clock::time_point::min();
   const auto now = std::chrono::steady_clock::now();

@@ -20,6 +20,8 @@
 #include "hdr_policy.h"
 #include "pipewire_cuda_policy.h"
 #include "pipewire_format.h"
+#include "pipewire_cursor.h"
+#include "src/meteor_cursor_scale.h"
 #include "private_display.h"
 #include "src/main.h"
 #include "src/platform/common.h"
@@ -80,6 +82,8 @@ namespace pipewire {
   };
 
   struct stream_data_t {
+    cursor_metadata_t cursor;
+    bool cursor_metadata = false;
     struct pw_stream *stream = nullptr;
     struct spa_hook stream_listener {};
     struct spa_video_info format {};
@@ -227,6 +231,7 @@ namespace pipewire {
           std::scoped_lock lock(stream_data.frame_mutex);
           stream_data.frame_ready = false;
           stream_data.current_buffer = nullptr;
+          stream_data.cursor = {};
         }
 
         if (stream_data.stream) {
@@ -359,7 +364,7 @@ namespace pipewire {
       }
     }
 
-    void fill_img(platf::img_t *img) {
+    void fill_img(platf::img_t *img, bool show_cursor) {
       pw_thread_loop_lock(loop);
       std::scoped_lock lock(stream_data.frame_mutex);
 
@@ -384,14 +389,40 @@ namespace pipewire {
           fill_img_dmabuf(img_descriptor, buf, stream_data);
         } else {
           auto *owned_image = static_cast<image_t *>(img);
-          owned_image->pixels.swap(*stream_data.front_buffer);
+          // Retain an untouched source when cursor-only frames reuse it.
+          if (stream_data.cursor_metadata) owned_image->pixels = *stream_data.front_buffer;
+          else owned_image->pixels.swap(*stream_data.front_buffer);
           img->data = owned_image->pixels.data();
           img->row_pitch = stream_data.local_stride;
+        }
+        const auto *meta = spa_buffer_find_meta(buf, SPA_META_Cursor);
+        if (stream_data.cursor_metadata && meta) {
+          const int scale = meteor_cursor::current_scale("wayland-cursor-scale-v1");
+          const auto &cursor = stream_data.cursor;
+          if (show_cursor && cursor.visible) {
+            if (buf->datas[0].type == SPA_DATA_DmaBuf) {
+              img_descriptor->buffer.resize(cursor.pixels.size() * 4);
+              std::memcpy(img_descriptor->buffer.data(), cursor.pixels.data(), img_descriptor->buffer.size());
+              img_descriptor->data = img_descriptor->buffer.data();
+              img_descriptor->src_w = cursor.width; img_descriptor->src_h = cursor.height;
+              img_descriptor->width = cursor.width * scale; img_descriptor->height = cursor.height * scale;
+              img_descriptor->x = cursor.left(scale); img_descriptor->y = cursor.top(scale);
+              img_descriptor->serial = cursor.serial;
+              img_descriptor->cursor_premultiplied = true;
+            } else if (stream_data.format.info.raw.format == SPA_VIDEO_FORMAT_BGRA ||
+                       stream_data.format.info.raw.format == SPA_VIDEO_FORMAT_BGRx) {
+              meteor_cursor::blend(img->data, stream_data.format.info.raw.size.width,
+                stream_data.format.info.raw.size.height, img->row_pitch, cursor.pixels.data(),
+                cursor.width, cursor.height, cursor.left(scale), cursor.top(scale), 0, 0, scale);
+            }
+          }
         }
       }
 
       pw_thread_loop_unlock(loop);
     }
+
+    void set_cursor_metadata(bool enabled) { stream_data.cursor_metadata = enabled; }
 
     void set_negotiate_maxframerate(bool negotiate_maxframerate) {
       negotiate_maxframerate_ = negotiate_maxframerate;
@@ -530,7 +561,18 @@ namespace pipewire {
       struct pw_buffer *b = nullptr;
 
       // 1. Drain the queue: Always grab the most recent buffer
+      bool cursor_updated = false;
       while (struct pw_buffer *aux = pw_stream_dequeue_buffer(d->stream)) {
+        if (aux->buffer && d->cursor_metadata) {
+          std::scoped_lock lock(d->frame_mutex);
+          cursor_updated |= d->cursor.update(spa_buffer_find_meta(aux->buffer, SPA_META_Cursor));
+        }
+        if (!aux->buffer || aux->buffer->n_datas == 0 || !aux->buffer->datas[0].chunk ||
+            aux->buffer->datas[0].chunk->size == 0 ||
+            (aux->buffer->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
+          pw_stream_queue_buffer(d->stream, aux);
+          continue;
+        }
         if (b) {
           pw_stream_queue_buffer(d->stream, b);  // Return the older, unused buffer
         }
@@ -538,6 +580,10 @@ namespace pipewire {
       }
 
       if (!b) {
+        if (cursor_updated) {
+          std::scoped_lock lock(d->frame_mutex);
+          if (d->current_buffer) { d->frame_ready = true; d->frame_cv.notify_one(); }
+        }
         return;
       }
 
@@ -667,7 +713,7 @@ namespace pipewire {
 
       // Ack the buffer type and metadata
       std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
-      std::array<const struct spa_pod *, 3> params;
+      std::array<const struct spa_pod *, 4> params;
       int n_params = 0;
       struct spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(buffer.data(), buffer.size());
       auto buffer_param = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(&pod_builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType, SPA_POD_Int(buffer_types)));
@@ -681,6 +727,13 @@ namespace pipewire {
       params[n_params] = damage_param;
       n_params++;
 
+      if (d->cursor_metadata) {
+      auto cursor_param = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(&pod_builder,
+        SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
+        SPA_PARAM_META_size, SPA_POD_CHOICE_RANGE_Int(cursor_metadata_t::metadata_size,
+          sizeof(spa_meta_cursor), cursor_metadata_t::metadata_size)));
+      params[n_params++] = cursor_param;
+      }
       pw_stream_update_params(d->stream, params.data(), n_params);
     }
 
@@ -875,7 +928,6 @@ namespace pipewire {
     }
 
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool show_cursor) {
-      // FIXME: show_cursor is ignored
       auto deadline = std::chrono::steady_clock::now() + timeout;
       int retries = 0;
 
@@ -894,7 +946,7 @@ namespace pipewire {
         img_egl->pts.reset();
         img_egl->seq.reset();
         img_egl->pw_flags.reset();
-        pipewire.fill_img(img_egl);
+        pipewire.fill_img(img_egl, show_cursor);
 
         // A dock change or compositor downscale can renegotiate while capture
         // is running. Recreate encoder surfaces before consuming that size.

@@ -281,6 +281,7 @@ namespace egl {
     int src_h;
 
     unsigned long serial;
+    bool cursor_premultiplied = false;
 
     std::vector<std::uint8_t> buffer;
   };
