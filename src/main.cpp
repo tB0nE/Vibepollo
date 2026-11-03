@@ -66,6 +66,7 @@
 #ifdef _WIN32
   #include "platform/windows/misc.h"
   #include "platform/windows/display_helper_integration.h"
+  #include "platform/windows/display.h"
   #include "platform/windows/virtual_display.h"
 #endif
 
@@ -319,6 +320,18 @@ int main(int argc, char *argv[]) {
     std::printf("%s version: %s commit: %s\n", PROJECT_NAME, PROJECT_VERSION, PROJECT_VERSION_COMMIT);
     return 0;
   }
+#ifdef _WIN32
+  if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
+    const auto manifest = platf::dxgi::query_multi_manifest(argc > 2 ? argv[2] : "");
+    if (!manifest) { std::fprintf(stderr,"Unsupported monitor selection\n"); return 1; }
+    std::printf("frame=%dx%d\n",manifest->frame_width,manifest->frame_height);
+    for (const auto &m : manifest->monitors)
+      std::printf("monitor=%s enabled=%d frame=%d,%d,%d,%d desktop=%d,%d,%d,%d\n",
+        m.label.c_str(),m.enabled,m.frame_x,m.frame_y,m.frame_w,m.frame_h,
+        m.desktop_x,m.desktop_y,m.desktop_w,m.desktop_h);
+    return 0;
+  }
+#endif
 
 #if defined(SUNSHINE_BUILD_STEAMOS) || defined(SUNSHINE_BUILD_METEOR)
   // Resolve assets from the executable's release, including launches outside

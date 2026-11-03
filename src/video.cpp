@@ -6857,6 +6857,11 @@ namespace video {
       // A short retry covers transient D3D device creation without waiting for
       // display topology to converge.
       disp.reset();
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR_PROBE")) {
+        reset_display(disp, encoder.platform_formats->dev_type,
+          probe_display_name, probe_config, required_adapter);
+        return;
+      }
       for (int attempt = 0; attempt < 2 && !disp; ++attempt) {
         disp = make_synthetic_probe_display(
           encoder.platform_formats->dev_type,

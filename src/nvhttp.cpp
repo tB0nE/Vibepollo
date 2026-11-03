@@ -4226,6 +4226,11 @@ namespace nvhttp {
      * leave out a monitor that lies between them.
      */
     std::optional<std::string> capture_outputs_error(const std::string &outputs) {
+#ifdef _WIN32
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR") && !platf::dxgi::query_multi_manifest(outputs)) {
+        return "Selected Windows monitors cannot be captured together by the experimental SDR DXGI backend";
+      }
+#endif
 #if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
       if (platf::split_csv(outputs).size() > 1) {
         if (const auto manifest = platf::x11_query_desktop_manifest(outputs); manifest && !manifest->contiguous) {
@@ -6205,8 +6210,11 @@ namespace nvhttp {
     output["frame_size"] = {0, 0};
     output["desktop_bounds"] = {0, 0, 0, 0};
     output["monitors"] = nlohmann::json::array();
-#if defined(__linux__)
+#if defined(_WIN32) || defined(__linux__)
     std::optional<platf::desktop_manifest_t> manifest;
+#ifdef _WIN32
+    manifest = platf::dxgi::query_multi_manifest(capture_outputs::get());
+#endif
   #ifdef SUNSHINE_BUILD_KWIN
     manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
   #endif

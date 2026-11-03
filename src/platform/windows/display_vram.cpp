@@ -3261,3 +3261,5 @@ namespace platf::dxgi {
     return 0;
   }
 }  // namespace platf::dxgi
+
+#include "display_multi.h"

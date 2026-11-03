@@ -43,6 +43,50 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "src/platform/common.h"
 #include "src/video.h"
 #include "utf_utils.h"
+
+namespace platf::dxgi {
+  std::optional<desktop_manifest_t> query_multi_manifest(const std::string &requested) {
+    if (!std::getenv("METEOR_WINDOWS_MULTIMONITOR")) return std::nullopt;
+    factory1_t factory;
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1,(void **)&factory))) return std::nullopt;
+    std::vector<output_descriptor_t> outputs;
+    unsigned active_adapters = 0;
+    for (UINT a = 0;; ++a) {
+      adapter_t adapter;
+      auto status = factory->EnumAdapters1(a,&adapter);
+      if (status == DXGI_ERROR_NOT_FOUND) break;
+      if (FAILED(status)) return std::nullopt;
+      bool active = false;
+      for (UINT i = 0;; ++i) {
+        output_t output;
+        status = adapter->EnumOutputs(i,&output);
+        if (status == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(status)) return std::nullopt;
+        DXGI_OUTPUT_DESC desc {};
+        if (FAILED(output->GetDesc(&desc))) return std::nullopt;
+        if (!desc.AttachedToDesktop) continue;
+        active = true;
+        const auto r = desc.DesktopCoordinates;
+        outputs.push_back({utf_utils::to_utf8(desc.DeviceName),r.left,r.top,r.right-r.left,r.bottom-r.top,
+          r.left == 0 && r.top == 0,desc.Rotation == DXGI_MODE_ROTATION_IDENTITY});
+      }
+      active_adapters += active;
+    }
+    if (active_adapters != 1 || outputs.empty()) return std::nullopt;
+    auto selected = split_csv(requested);
+    for (const auto &name : selected)
+      if (std::none_of(outputs.begin(),outputs.end(),[&](const auto &o) { return o.name == name && o.capturable; })) return std::nullopt;
+    const auto region = compute_capture_region_from_outputs(outputs,GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),selected);
+    if (!region.contiguous || region.width > k_max_capture_axis_px || region.height > k_max_capture_axis_px ||
+        (int64_t)region.width*region.height > k_max_capture_total_px) return std::nullopt;
+    desktop_manifest_t result;
+    result.frame_width = region.width; result.frame_height = region.height;
+    result.desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN); result.desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    result.desktop_width = GetSystemMetrics(SM_CXVIRTUALSCREEN); result.desktop_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    result.monitors = region.monitors; result.contiguous = region.contiguous;
+    return result;
+  }
+}
 #include "wgc_capture_policy.h"
 
 namespace platf {
@@ -1769,6 +1813,9 @@ namespace platf {
     const bool prefer_wgc_backend = !user_requested_ddx && (wgc_requested || default_to_wgc);
 
     if (hwdevice_type == mem_type_e::dxgi) {
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        return dxgi::create_multi_display(config, display_name, required_adapter_luid);
+      }
       if (prefer_wgc_backend) {
         auto disp = dxgi::display_wgc_ipc_vram_t::create(config, display_name, required_adapter_luid);
         if (disp || wgc_requested) {
@@ -1781,6 +1828,10 @@ namespace platf {
         return disp;
       }
     } else if (hwdevice_type == mem_type_e::system) {
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        BOOST_LOG(error) << "Experimental Windows multi-monitor capture requires a DXGI hardware encoder";
+        return nullptr;
+      }
       if (prefer_wgc_backend) {
         auto disp = dxgi::display_wgc_ipc_ram_t::create(config, display_name, required_adapter_luid);
         if (disp || wgc_requested) {

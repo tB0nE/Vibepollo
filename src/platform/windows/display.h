@@ -29,12 +29,16 @@
 #include "src/platform/windows/ipc/process_handler.h"
 #include "src/utility.h"
 #include "src/video.h"
+#include "src/platform/linux/display_manifest.h"
+#include "src/capture_outputs.h"
 
 namespace platf::game_activity {
   class refresh_target_t;
 }
 
 namespace platf::dxgi {
+  std::optional<desktop_manifest_t> query_multi_manifest(const std::string &outputs);
+  std::shared_ptr<display_t> create_multi_display(const video::config_t &, const std::string &, const std::optional<LUID> &);
   namespace present_timing {
     class capture_stamper_t;
   }
