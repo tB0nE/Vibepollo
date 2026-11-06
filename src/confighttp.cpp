@@ -4893,6 +4893,20 @@ namespace confighttp {
   }
 
   /**
+   * @brief Check whether a Moonlight pairing session is waiting for a PIN.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void getPendingPin(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    nlohmann::json output_tree;
+    output_tree["pending"] = nvhttp::has_pending_pin();
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief Reset the display device persistence.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -6131,6 +6145,7 @@ namespace confighttp {
       });
     };
 
+    register_api_route("^/api/pin$", "GET", getPendingPin);
     register_api_route("^/api/pin$", "POST", savePin);
     register_api_route("^/api/otp$", "POST", getOTP);
     register_api_route("^/api/apps$", "GET", getApps);
