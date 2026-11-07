@@ -221,8 +221,6 @@ namespace nvhttp {
    * @return `true` if the host is holding an open pairing response awaiting PIN submission.
    */
   bool has_pending_pin();
-  void report_pending_pin(std::string pin);
-  std::string take_reported_pin();
 
   /**
    * @brief Pick the client label used for display-facing behavior.

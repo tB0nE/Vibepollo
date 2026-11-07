@@ -4902,14 +4902,7 @@ namespace confighttp {
       return;
     }
     nlohmann::json output_tree;
-    bool pending = nvhttp::has_pending_pin();
-    output_tree["pending"] = pending;
-    if (pending) {
-      auto pin = nvhttp::take_reported_pin();
-      if (!pin.empty()) {
-        output_tree["pin"] = pin;
-      }
-    }
+    output_tree["pending"] = nvhttp::has_pending_pin();
     send_response(response, output_tree);
   }
 
