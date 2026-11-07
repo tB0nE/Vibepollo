@@ -3697,16 +3697,6 @@ namespace nvhttp {
       return true;
     }
 
-    bool has_pending_pin() {
-      std::lock_guard pairing_lock {pairing_sessions_mutex};
-      expire_pairing_sessions_locked(std::chrono::steady_clock::now());
-      if (map_id_sess.empty()) return false;
-      if (map_id_sess.size() != 1 || map_id_sess.begin()->second.last_phase != PAIR_PHASE::NONE) return false;
-      auto &sess = map_id_sess.begin()->second;
-      if (sess.async_insert_pin.salt.size() < 32) return false;
-      return sess.async_insert_pin.response.has_left() || sess.async_insert_pin.response.has_right();
-    }
-
     template<class T>
     void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
       print_req<T>(request);
