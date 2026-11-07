@@ -247,6 +247,8 @@ namespace nvhttp {
   static std::string otp_passphrase;
   static std::string otp_device_name;
   static std::chrono::time_point<std::chrono::steady_clock> otp_creation_time;
+  static std::string reported_client_pin;
+  static std::chrono::time_point<std::chrono::steady_clock> reported_pin_time;
 
 #ifdef _WIN32
   namespace {
@@ -3707,6 +3709,25 @@ namespace nvhttp {
       return sess.async_insert_pin.response.has_left() || sess.async_insert_pin.response.has_right();
     }
 
+    void report_pending_pin(std::string pin) {
+      if (pin.size() != 4) return;
+      for (char c : pin) { if (c < '0' || c > '9') return; }
+      std::lock_guard pairing_lock {pairing_sessions_mutex};
+      reported_client_pin = std::move(pin);
+      reported_pin_time = std::chrono::steady_clock::now();
+    }
+
+    std::string take_reported_pin() {
+      std::lock_guard pairing_lock {pairing_sessions_mutex};
+      if (reported_client_pin.empty()) return {};
+      constexpr auto PIN_REPORT_EXPIRE = std::chrono::minutes(3);
+      if (std::chrono::steady_clock::now() - reported_pin_time > PIN_REPORT_EXPIRE) {
+        reported_client_pin.clear();
+        return {};
+      }
+      return reported_client_pin;
+    }
+
     template<class T>
     void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
       print_req<T>(request);
@@ -6584,6 +6605,20 @@ namespace nvhttp {
     http_server.resource["^/pair/?$"]["POST"] = pair<SimpleWeb::HTTP>;
     http_server.resource["^/unpair/?$"]["GET"] = unpair<SimpleWeb::HTTP>;
     http_server.resource["^/unpair/?$"]["POST"] = unpair<SimpleWeb::HTTP>;
+    http_server.resource["^/pair_pin_report$"]["POST"] = [](auto resp, auto req) {
+      try {
+        std::stringstream ss;
+        ss << req->content.rdbuf();
+        auto j = nlohmann::json::parse(ss.str());
+        std::string pin = j.value("pin", "");
+        report_pending_pin(std::move(pin));
+        SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+        resp->write("{\"status\":true}", headers);
+      } catch (...) {
+        SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+        resp->write(SimpleWeb::StatusCode::client_error_bad_request, "{\"status\":false}", headers);
+      }
+    };
 
     http_server.config.reuse_address = true;
     http_server.config.address = net::get_bind_address(address_family);
