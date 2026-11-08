@@ -89,6 +89,7 @@
 #endif
 
 #include "capture_outputs.h"
+#include "display_plan.h"
 #include "process.h"
 #include "rtsp.h"
 #include "rtsp_pending_policy.h"
@@ -4285,6 +4286,36 @@ namespace nvhttp {
     }
 
     /**
+     * @brief The session's screen plan for a launch or resume request, made before any virtual
+     *        display exists. Nothing when Meteor's multi-monitor capture is off.
+     * @param error Set when the screens asked for can't be streamed together.
+     */
+    std::optional<display_plan::plan_t> plan_for_request(const std::string &outputs, int virtual_count, std::string &error) {
+#ifdef _WIN32
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        auto plan = platf::dxgi::make_plan(outputs, virtual_count);
+        if (!plan) {
+          error = "The selected screens can't be streamed together";
+        }
+        return plan;
+      }
+#endif
+      return std::nullopt;
+    }
+
+    int requested_virtual_count(const args_t &args) {
+      const auto value = get_arg(args, "virtual_displays", "");
+      if (value.empty()) {
+        return 0;
+      }
+      try {
+        return std::clamp(std::stoi(value), 0, 4);
+      } catch (...) {
+        return 0;
+      }
+    }
+
+    /**
      * @brief Why a launch or resume can't capture the monitors in its outputs= list, if so.
      *
      * Several monitors are cropped from the desktop as one rectangle, so they must not
@@ -4295,9 +4326,6 @@ namespace nvhttp {
       // "@virtual" asks for the session's virtual displays alone, which are created after this check.
       if (outputs == capture_outputs::virtual_only_token) {
         return std::nullopt;
-      }
-      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR") && !platf::dxgi::query_multi_manifest(outputs)) {
-        return "Selected Windows monitors cannot be captured together by the experimental SDR DXGI backend";
       }
 #endif
 #if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
@@ -4957,6 +4985,15 @@ namespace nvhttp {
           BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
         }
       }
+      std::string plan_error;
+      const auto session_plan = plan_for_request(requested_outputs, requested_virtual_count(args), plan_error);
+      if (!plan_error.empty()) {
+        BOOST_LOG(warning) << "Rejecting launch: "sv << plan_error;
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", plan_error);
+        tree.put("root.gamesession", 0);
+        return;
+      }
       std::optional<std::string> pending_output_override;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override) {
@@ -4968,6 +5005,9 @@ namespace nvhttp {
         config::set_runtime_output_name_override(std::nullopt);
         // A viewer joining a running stream can't change what it captures.
         capture_outputs::set(requested_outputs);
+        if (session_plan) {
+          display_plan::set(*session_plan);
+        }
 #if defined(_WIN32) || defined(__linux__)
         stream::cancel_paused_display_cleanup();
 #endif
@@ -5567,8 +5607,20 @@ namespace nvhttp {
       tree.put("root.resume", 0);
       return;
     }
+    std::string plan_error;
+    const auto session_plan = plan_for_request(requested_outputs, requested_virtual_count(args), plan_error);
+    if (!plan_error.empty()) {
+      BOOST_LOG(warning) << "Rejecting resume: "sv << plan_error;
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", plan_error);
+      tree.put("root.resume", 0);
+      return;
+    }
     if (no_active_sessions) {
       capture_outputs::set(requested_outputs);
+      if (session_plan) {
+        display_plan::set(*session_plan);
+      }
     }
     if (!proc::proc.allow_client_commands || !verified_client->allow_client_commands) {
       launch_session->client_do_cmds.clear();
@@ -6329,7 +6381,60 @@ namespace nvhttp {
 #if defined(_WIN32) || defined(__linux__)
     std::optional<platf::desktop_manifest_t> manifest;
 #ifdef _WIN32
-    manifest = platf::dxgi::query_multi_manifest(capture_outputs::get());
+    // Meteor's multi-monitor capture streams the session's plan. With launch options in the
+    // query (outputs, virtual_displays, virtual_only) this is instead the plan a launch with
+    // those options would get, so a client can request exactly that stream size.
+    if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+      const auto args = request->parse_query_string();
+      const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
+                                 args.find("virtual_only") != args.end();
+      std::optional<display_plan::plan_t> plan;
+      if (asks_for_plan) {
+        const auto outputs = get_arg(args, "virtual_only", "") == "1" ? std::string {capture_outputs::virtual_only_token} :
+                                                                         get_arg(args, "outputs", "");
+        plan = platf::dxgi::make_plan(outputs, requested_virtual_count(args));
+      } else {
+        plan = platf::dxgi::session_plan();
+      }
+      if (!plan) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        response->close_connection_after_response = true;
+        return;
+      }
+      const auto attached = platf::dxgi::attached_outputs();
+      const auto placed = attached ? platf::dxgi::place(*plan, *attached) : std::vector<std::optional<platf::dxgi::attached_output_t>>(plan->screens.size());
+      output["frame_size"] = {plan->frame_width, plan->frame_height};
+      // Clients send input as points in the frame, which the host maps back to each screen.
+      output["desktop_bounds"] = {0, 0, plan->frame_width, plan->frame_height};
+      output["contiguous"] = true;
+      output["tiled"] = true;
+      // Screens are packed by size, so any set of monitors can be streamed together.
+      output["any_selection"] = true;
+      output["planned"] = asks_for_plan;
+      for (std::size_t i = 0; i < plan->screens.size(); ++i) {
+        const auto &m = plan->screens[i];
+        nlohmann::json desktop = {0, 0, m.width, m.height};
+        if (i < placed.size() && placed[i]) {
+          const auto &r = placed[i]->rect;
+          desktop = {r.left, r.top, r.right - r.left, r.bottom - r.top};
+        }
+        output["monitors"].push_back({
+          {"id", m.id},
+          {"label", m.label},
+          {"enabled", m.enabled},
+          {"capturable", true},
+          {"is_primary", m.is_primary},
+          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.width, m.height} : nlohmann::json {0, 0, 0, 0}},
+          {"desktop_rect", desktop},
+          {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
+        });
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+      response->close_connection_after_response = true;
+      return;
+    }
 #endif
   #ifdef SUNSHINE_BUILD_KWIN
     manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());

@@ -61,11 +61,11 @@ namespace platf::dxgi {
     }
   }  // namespace
 
-  std::optional<desktop_manifest_t> query_multi_manifest(const std::string &requested) {
+  std::optional<std::vector<attached_output_t>> attached_outputs() {
     if (!std::getenv("METEOR_WINDOWS_MULTIMONITOR")) return std::nullopt;
     factory1_t factory;
     if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1,(void **)&factory))) return std::nullopt;
-    std::vector<output_descriptor_t> outputs;
+    std::vector<attached_output_t> outputs;
     unsigned active_adapters = 0;
     for (UINT a = 0;; ++a) {
       adapter_t adapter;
@@ -82,57 +82,63 @@ namespace platf::dxgi {
         if (FAILED(output->GetDesc(&desc))) return std::nullopt;
         if (!desc.AttachedToDesktop) continue;
         active = true;
-        const auto r = desc.DesktopCoordinates;
-        outputs.push_back({utf_utils::to_utf8(desc.DeviceName),r.left,r.top,r.right-r.left,r.bottom-r.top,
-          r.left == 0 && r.top == 0,desc.Rotation == DXGI_MODE_ROTATION_IDENTITY});
+        const auto name = utf_utils::to_utf8(desc.DeviceName);
+        outputs.push_back({name, desc.DesktopCoordinates, is_sunshine_virtual_output(name), desc.Rotation == DXGI_MODE_ROTATION_IDENTITY});
       }
       active_adapters += active;
     }
+    // Composition copies between outputs of one GPU; a second active adapter can't join.
     if (active_adapters != 1 || outputs.empty()) return std::nullopt;
-    auto selected = split_csv(requested);
-    const bool virtual_only = std::find(selected.begin(), selected.end(), std::string {capture_outputs::virtual_only_token}) != selected.end();
-    if (virtual_only) {
-      // The session's virtual displays and nothing else; the physical monitors stay on the desk.
-      selected.clear();
-      for (const auto &o : outputs) {
-        if (o.capturable && is_sunshine_virtual_output(o.name)) selected.push_back(o.name);
-      }
-      if (selected.empty()) return std::nullopt;
-    } else if (!selected.empty()) {
-      // A client's output list can name displays that no longer exist, or predate this
-      // session's virtual displays. Virtual displays are attached for the stream, so
-      // they always join the capture rather than depending on a stale label.
-      for (const auto &o : outputs) {
-        if (!o.capturable || std::find(selected.begin(), selected.end(), o.name) != selected.end()) continue;
-        if (is_sunshine_virtual_output(o.name)) selected.push_back(o.name);
-      }
+    // Virtual displays in creation order, which is the order Windows numbers them.
+    const auto number = [](const std::string &name) {
+      const auto digits = name.find_last_not_of("0123456789");
+      return digits + 1 < name.size() ? std::stoi(name.substr(digits + 1)) : 0;
+    };
+    std::stable_sort(outputs.begin(), outputs.end(), [&](const auto &a, const auto &b) {
+      return a.is_virtual == b.is_virtual ? (a.is_virtual && number(a.name) < number(b.name)) : !a.is_virtual;
+    });
+    return outputs;
+  }
+
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count) {
+    const auto outputs = attached_outputs();
+    if (!outputs) return std::nullopt;
+    std::vector<display_plan::physical_t> physical;
+    for (const auto &o : *outputs) {
+      if (o.is_virtual || !o.identity) continue;
+      const auto &r = o.rect;
+      physical.push_back({o.name, r.left, r.top, r.right - r.left, r.bottom - r.top, r.left == 0 && r.top == 0});
     }
-    for (const auto &name : selected)
-      if (std::none_of(outputs.begin(),outputs.end(),[&](const auto &o) { return o.name == name && o.capturable; })) return std::nullopt;
-    // Packs the monitors into rows when their bounding box is wider or taller than the HEVC
-    // decoder allows; a layout that already fits comes back unchanged.
-    const auto region = compute_packed_capture_region_from_outputs(outputs,GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),selected);
-    if ((!region.contiguous && !virtual_only) || region.width > k_max_capture_axis_px || region.height > k_max_capture_axis_px ||
-        (int64_t)region.width*region.height > k_max_capture_total_px) return std::nullopt;
-    // Tell the client which monitors are session virtual displays, so it counts them as
-    // virtual rather than as physical monitors it could ask to capture by name.
-    auto marked_monitors = region.monitors;
-    for (auto &m : marked_monitors) m.is_virtual = is_sunshine_virtual_output(m.label);
-    if (virtual_only) {
-      // The physical monitor at the desktop origin is not in the frame, so the first screen
-      // that is takes its place as primary (clients and Meteor's depth both follow this flag).
-      bool taken = false;
-      for (auto &m : marked_monitors) {
-        m.is_primary = m.enabled && !taken;
-        taken = taken || m.is_primary;
-      }
+    const bool virtual_only = requested == capture_outputs::virtual_only_token;
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only);
+  }
+
+  std::optional<display_plan::plan_t> session_plan() {
+    if (auto plan = display_plan::get()) return plan;
+    // A capture that no launch planned (e.g. the encoder probe): stream what is attached.
+    const auto outputs = attached_outputs();
+    if (!outputs) return std::nullopt;
+    const auto virtual_count = std::count_if(outputs->begin(), outputs->end(), [](const auto &o) { return o.is_virtual; });
+    return make_plan(capture_outputs::get(), static_cast<int>(virtual_count));
+  }
+
+  std::vector<std::optional<attached_output_t>> place(const display_plan::plan_t &plan, const std::vector<attached_output_t> &outputs) {
+    std::vector<attached_output_t> virtuals;
+    for (const auto &o : outputs) {
+      if (o.is_virtual) virtuals.push_back(o);
     }
-    desktop_manifest_t result;
-    result.frame_width = region.width; result.frame_height = region.height;
-    result.desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN); result.desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    result.desktop_width = GetSystemMetrics(SM_CXVIRTUALSCREEN); result.desktop_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    result.monitors = std::move(marked_monitors); result.contiguous = region.contiguous; result.tiled = region.tiled;
-    return result;
+    std::vector<std::optional<attached_output_t>> placed;
+    for (const auto &s : plan.screens) {
+      std::optional<attached_output_t> match;
+      if (s.enabled && s.is_virtual) {
+        if (s.virtual_index >= 1 && s.virtual_index <= (int) virtuals.size()) match = virtuals[s.virtual_index - 1];
+      } else if (s.enabled) {
+        const auto it = std::find_if(outputs.begin(), outputs.end(), [&](const auto &o) { return !o.is_virtual && o.name == s.label; });
+        if (it != outputs.end()) match = *it;
+      }
+      placed.push_back(match);
+    }
+    return placed;
   }
 }
 #include "wgc_capture_policy.h"

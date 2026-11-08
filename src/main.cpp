@@ -322,13 +322,13 @@ int main(int argc, char *argv[]) {
   }
 #ifdef _WIN32
   if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
-    const auto manifest = platf::dxgi::query_multi_manifest(argc > 2 ? argv[2] : "");
-    if (!manifest) { std::fprintf(stderr,"Unsupported monitor selection\n"); return 1; }
-    std::printf("frame=%dx%d\n",manifest->frame_width,manifest->frame_height);
-    for (const auto &m : manifest->monitors)
-      std::printf("monitor=%s enabled=%d frame=%d,%d,%d,%d desktop=%d,%d,%d,%d\n",
-        m.label.c_str(),m.enabled,m.frame_x,m.frame_y,m.frame_w,m.frame_h,
-        m.desktop_x,m.desktop_y,m.desktop_w,m.desktop_h);
+    // --meteor-display-layout [outputs|@virtual] [virtual displays]: the plan a launch would get.
+    const auto plan = platf::dxgi::make_plan(argc > 2 ? argv[2] : "", argc > 3 ? std::atoi(argv[3]) : 0);
+    if (!plan) { std::fprintf(stderr,"Unsupported monitor selection\n"); return 1; }
+    std::printf("frame=%dx%d\n",plan->frame_width,plan->frame_height);
+    for (const auto &m : plan->screens)
+      std::printf("screen=%s label=%s enabled=%d primary=%d virtual=%d frame=%d,%d,%d,%d\n",
+        m.id.c_str(),m.label.c_str(),m.enabled,m.is_primary,m.is_virtual,m.frame_x,m.frame_y,m.width,m.height);
     return 0;
   }
 #endif

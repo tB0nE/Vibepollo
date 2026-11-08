@@ -31,13 +31,29 @@
 #include "src/video.h"
 #include "src/platform/linux/display_manifest.h"
 #include "src/capture_outputs.h"
+#include "src/display_plan.h"
 
 namespace platf::game_activity {
   class refresh_target_t;
 }
 
 namespace platf::dxgi {
-  std::optional<desktop_manifest_t> query_multi_manifest(const std::string &outputs);
+  /// An output attached to the desktop, with whether it is one of the session's virtual displays.
+  struct attached_output_t {
+    std::string name;
+    RECT rect {};
+    bool is_virtual = false;
+    bool identity = true;  ///< Not rotated; composition copies pixels as they are.
+  };
+  /// Physical outputs first, then virtual displays in creation order. Nothing when
+  /// multi-monitor capture is off or more than one GPU drives the desktop.
+  std::optional<std::vector<attached_output_t>> attached_outputs();
+  /// The plan for `requested` (comma-separated output names, or the virtual-only token).
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count);
+  /// The plan the current session launched with, else one made from what is attached.
+  std::optional<display_plan::plan_t> session_plan();
+  /// The output streamed in each of the plan's screens, where it is attached.
+  std::vector<std::optional<attached_output_t>> place(const display_plan::plan_t &plan, const std::vector<attached_output_t> &outputs);
   std::shared_ptr<display_t> create_multi_display(const video::config_t &, const std::string &, const std::optional<LUID> &);
   namespace present_timing {
     class capture_stamper_t;

@@ -33,6 +33,9 @@ extern "C" {
 #if defined(__linux__) || defined(_WIN32)
   #include "platform/linux/display_manifest.h"
 #endif
+#ifdef _WIN32
+  #include <windows.h>
+#endif
 
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
@@ -742,6 +745,14 @@ namespace input {
       touch_port_dim_x,
       touch_port_dim_y
     };
+#ifdef _WIN32
+    // A tiled frame maps to absolute desktop positions. Normalise them against the desktop as
+    // it is now: virtual displays attach and move after the capture started.
+    if (touch_port.frame_tiles) {
+      abs_port = {-GetSystemMetrics(SM_XVIRTUALSCREEN), -GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+    }
+#endif
 
     mouse_controller->move_absolute(
       {abs_port.offset_x, abs_port.offset_y, abs_port.width, abs_port.height},
