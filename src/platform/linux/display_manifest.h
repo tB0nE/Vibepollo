@@ -54,6 +54,7 @@ namespace platf {
     bool enabled = false;  ///< Part of the captured frame.
     bool capturable = true;
     bool is_primary = false;
+    bool is_virtual = false;  ///< A virtual display created for the session (reported as hint.virtual).
     int frame_x = 0, frame_y = 0, frame_w = 0, frame_h = 0;  ///< Where it is in the frame; zero when not enabled.
     int desktop_x = 0, desktop_y = 0, desktop_w = 0, desktop_h = 0;  ///< Where it is on the desktop.
   };

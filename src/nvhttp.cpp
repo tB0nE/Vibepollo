@@ -1507,6 +1507,27 @@ namespace nvhttp {
               launch_session->pre_virtual_display_refresh_rates = std::move(rates);
             }
           }
+          // Meteor composes several monitors into one stream frame, so the mode a client
+          // asks for is the whole frame, not one screen. Creating each virtual display at
+          // that size made every connect grow the next frame (2560x1440 -> 5120x2880 ->
+          // 7680x4320). A virtual display is one screen: match the primary physical monitor.
+          if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+            if (auto physical_devices = display_helper_integration::enumerate_devices()) {
+              for (const auto &device : *physical_devices) {
+                if (device.m_device_id.empty() || !device.m_info || !device.m_info->m_primary ||
+                    VDISPLAY::is_virtual_display_output(device.m_device_id)) {
+                  continue;
+                }
+                const auto &resolution = device.m_info->m_resolution;
+                if (resolution.m_width > 0 && resolution.m_height > 0) {
+                  vd_width = resolution.m_width;
+                  vd_height = resolution.m_height;
+                  BOOST_LOG(info) << "Virtual display sized to the primary monitor: " << vd_width << 'x' << vd_height;
+                }
+                break;
+              }
+            }
+          }
           VDISPLAY::setWatchdogFeedingEnabled(true);
           const char *hdr_profile = launch_session->hdr_profile ? launch_session->hdr_profile->c_str() : nullptr;
           auto display_info = VDISPLAY::createVirtualDisplay(
@@ -1702,6 +1723,50 @@ namespace nvhttp {
             };
 
             VDISPLAY::schedule_virtual_display_recovery_monitor(recovery_params);
+
+            // Additional displays the client asked for. Each gets its own identity so the
+            // driver treats it as a separate monitor, and preserve_peer_displays keeps the
+            // creation of one from tearing down the others.
+            launch_session->extra_virtual_display_device_ids.clear();
+            for (int extra = 1; extra <= launch_session->extra_virtual_displays; ++extra) {
+              const std::string extra_uid = display_uuid_source + "#vd" + std::to_string(extra + 1);
+              const auto extra_uuid = VDISPLAY::virtualDisplayUuidFromStableId(extra_uid);
+              GUID extra_guid {};
+              std::memcpy(&extra_guid, extra_uuid.b8, sizeof(extra_guid));
+              const std::string extra_label = client_label + " " + std::to_string(extra + 1);
+              auto extra_info = VDISPLAY::createVirtualDisplay(
+                extra_uid.c_str(),
+                extra_label.c_str(),
+                hdr_profile,
+                vd_width,
+                vd_height,
+                vd_fps,
+                extra_guid,
+                base_vd_fps_millihz,
+                framegen_refresh_active,
+                refresh_multiplier,
+                virtual_display_hdr_requested,
+                false,
+                !shared_mode,
+                true
+              );
+              if (!extra_info) {
+                BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " could not be created; continuing without it.";
+                continue;
+              }
+              std::string extra_device_id;
+              if (extra_info->device_id && !extra_info->device_id->empty()) {
+                extra_device_id = *extra_info->device_id;
+              } else if (auto resolved_extra = VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(extra_uid, "", extra_label, false)) {
+                extra_device_id = *resolved_extra;
+              }
+              if (extra_device_id.empty()) {
+                BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " has no resolved device id; it will not join the topology.";
+                continue;
+              }
+              BOOST_LOG(info) << "Extra virtual display " << (extra + 1) << " created (device_id=" << extra_device_id << ").";
+              launch_session->extra_virtual_display_device_ids.push_back(std::move(extra_device_id));
+            }
           } else {
             disable_virtual_display_request();
             launch_session->virtual_display = false;
@@ -4875,6 +4940,16 @@ namespace nvhttp {
         tree.put("root.gamesession", 0);
         return;
       }
+      // `virtual_displays=N` asks for N virtual displays this session; the first is the
+      // usual per-client display, the rest are created beside it.
+      if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
+        try {
+          launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+          BOOST_LOG(info) << "Client requested "sv << (launch_session->extra_virtual_displays + 1) << " virtual display(s)"sv;
+        } catch (...) {
+          BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
+        }
+      }
       std::optional<std::string> pending_output_override;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override) {
@@ -5248,6 +5323,29 @@ namespace nvhttp {
       runtime_overrides_guard.disable();
     }
 
+#ifdef _WIN32
+  // A resumed session keeps the virtual displays its launch created. Find the extra ones again so
+  // the display request lists them; without that the helper rebuilds the layout from the primary
+  // virtual display alone and switches the rest off.
+  static void find_extra_virtual_displays(rtsp_stream::launch_session_t &session) {
+    session.extra_virtual_display_device_ids.clear();
+    if (session.extra_virtual_displays <= 0) {
+      return;
+    }
+    const auto mode = session.virtual_display_mode_override.value_or(config::video.virtual_display_mode);
+    const bool shared_mode = mode == config::video_t::virtual_display_mode_e::shared;
+    const std::string base_uid = (!shared_mode && !session.client_uuid.empty()) ? session.client_uuid : session.unique_id;
+    for (int extra = 1; extra <= session.extra_virtual_displays; ++extra) {
+      const std::string extra_uid = base_uid + "#vd" + std::to_string(extra + 1);
+      if (auto found = VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(extra_uid, "", session.client_name, false)) {
+        session.extra_virtual_display_device_ids.push_back(*found);
+      } else {
+        BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " was not found on resume.";
+      }
+    }
+  }
+#endif
+
   void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, const bool normal_app_transition, const bool launched_from_applist) {
     print_req<SunshineHTTPS>(request);
 
@@ -5444,6 +5542,13 @@ namespace nvhttp {
     }
 
     auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+    if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
+      try {
+        launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+      } catch (...) {
+        BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
+      }
+    }
     const auto requested_outputs = get_arg(args, "outputs", "");
     if (const auto error = capture_outputs_error(requested_outputs)) {
       BOOST_LOG(warning) << "Rejecting resume: "sv << *error;
@@ -5678,6 +5783,7 @@ namespace nvhttp {
           display_startup_cancelled,
           display_startup_deadline
         );
+        find_extra_virtual_displays(*launch_session);
         auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);
         if (!request) {
           BOOST_LOG(warning) << "Display helper: failed to build display configuration request; continuing with existing display.";
@@ -6237,7 +6343,7 @@ namespace nvhttp {
           {"is_primary", m.is_primary},
           {"frame_rect", {m.frame_x, m.frame_y, m.frame_w, m.frame_h}},
           {"desktop_rect", {m.desktop_x, m.desktop_y, m.desktop_w, m.desktop_h}},
-          {"hint", nlohmann::json::object()},
+          {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
         });
       }
     } else

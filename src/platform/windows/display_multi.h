@@ -1,8 +1,32 @@
 #pragma once
 // Experimental SDR same-adapter desktop composition, enabled explicitly.
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
 namespace platf::dxgi {
+  // Meteor's depth only covers the primary monitor, but with several monitors tiled into one
+  // frame it can't tell where that is. Publish its rectangle in the capture frame (frame size,
+  // then x y w h) at the path Meteor names; remove the file when one monitor fills the frame.
+  inline void publish_capture_region(const desktop_manifest_t &manifest, size_t outputs) {
+    const wchar_t *path = _wgetenv(L"METEOR_CAPTURE_REGION_FILE");
+    if (!path || !*path) return;
+    const std::filesystem::path file {path};
+    std::error_code ignored;
+    const auto primary = std::find_if(manifest.monitors.begin(), manifest.monitors.end(),
+                                      [](const auto &m) { return m.enabled && m.is_primary; });
+    if (outputs < 2 || primary == manifest.monitors.end()) {
+      std::filesystem::remove(file, ignored);
+      return;
+    }
+    std::ofstream out {file, std::ios::trunc};
+    out << manifest.frame_width << ' ' << manifest.frame_height << ' ' << primary->frame_x << ' ' << primary->frame_y
+        << ' ' << primary->frame_w << ' ' << primary->frame_h << '\n';
+  }
+
   class display_multi_t: public display_vram_t {
-    struct source_t { DXGI_OUTPUT_DESC desc; dup_t duplication; bool ready = false; };
+    struct source_t { DXGI_OUTPUT_DESC desc; dup_t duplication; bool ready = false; int frame_x = 0, frame_y = 0; };
+    bool tiled = false;
     std::vector<source_t> sources;
     texture2d_t composite;
     texture2d_t cursor_surface;
@@ -22,7 +46,9 @@ namespace platf::dxgi {
         if (FAILED(candidate->GetDesc(&source.desc))) return -1;
         if (!source.desc.AttachedToDesktop) continue;
         const auto label = utf_utils::to_utf8(source.desc.DeviceName);
-        if (std::none_of(manifest->monitors.begin(),manifest->monitors.end(),[&](const auto &m) { return m.label == label && m.enabled; })) continue;
+        const auto monitor = std::find_if(manifest->monitors.begin(),manifest->monitors.end(),[&](const auto &m) { return m.label == label && m.enabled; });
+        if (monitor == manifest->monitors.end()) continue;
+        source.frame_x = monitor->frame_x; source.frame_y = monitor->frame_y;
         if (source.desc.Rotation != DXGI_MODE_ROTATION_IDENTITY) return -1;
         output1_t output1;
         if (FAILED(candidate->QueryInterface(IID_IDXGIOutput1, (void **)&output1))) return -1;
@@ -34,11 +60,25 @@ namespace platf::dxgi {
         sources.push_back(std::move(source));
       }
       if (sources.empty()) return -1;
-      width = width_before_rotation = bounds.right-bounds.left;
-      height = height_before_rotation = bounds.bottom-bounds.top;
+      tiled = manifest->tiled;
+      if (tiled) {
+        // Too large for one picture: the monitors sit in rows of a smaller frame.
+        // Input arrives as a point in that frame, so publish the tiles and let the
+        // shared input path map it back to the desktop (absolute coordinates, hence
+        // the virtual-screen origin as the offset).
+        width = width_before_rotation = manifest->frame_width;
+        height = height_before_rotation = manifest->frame_height;
+        frame_tiles.clear();
+        for (const auto &m : manifest->monitors) {
+          if (m.enabled) frame_tiles.push_back({m.frame_x, m.frame_y, m.desktop_x, m.desktop_y, m.frame_w, m.frame_h});
+        }
+      } else {
+        width = width_before_rotation = bounds.right-bounds.left;
+        height = height_before_rotation = bounds.bottom-bounds.top;
+      }
       if (width > 8192 || height > 8192 || (int64_t)width*height > 35389440) return -1;
-      offset_x = bounds.left-GetSystemMetrics(SM_XVIRTUALSCREEN);
-      offset_y = bounds.top-GetSystemMetrics(SM_YVIRTUALSCREEN);
+      offset_x = tiled ? -GetSystemMetrics(SM_XVIRTUALSCREEN) : bounds.left-GetSystemMetrics(SM_XVIRTUALSCREEN);
+      offset_y = tiled ? -GetSystemMetrics(SM_YVIRTUALSCREEN) : bounds.top-GetSystemMetrics(SM_YVIRTUALSCREEN);
       display_rotation = DXGI_MODE_ROTATION_IDENTITY;
       capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
       D3D11_TEXTURE2D_DESC desc {};
@@ -51,7 +91,8 @@ namespace platf::dxgi {
       render_target_t target;
       if (FAILED(device->CreateRenderTargetView(composite.get(),nullptr,&target))) return -1;
       const float black[4] = {0,0,0,1}; device_ctx->ClearRenderTargetView(target.get(),black);
-      BOOST_LOG(info) << "Experimental DXGI multi-output capture: " << sources.size() << " outputs, " << width << 'x' << height;
+      BOOST_LOG(info) << "Experimental DXGI multi-output capture: " << sources.size() << " outputs, " << width << 'x' << height << (tiled ? " (tiled)" : "");
+      publish_capture_region(*manifest, sources.size());
       return 0;
     }
     bool is_hdr() override { return false; }
@@ -92,7 +133,7 @@ namespace platf::dxgi {
         D3D11_TEXTURE2D_DESC desc; image->GetDesc(&desc);
         const auto r = source.desc.DesktopCoordinates;
         if (desc.Format != capture_format || desc.Width != (UINT)(r.right-r.left) || desc.Height != (UINT)(r.bottom-r.top)) return capture_e::reinit;
-        device_ctx->CopySubresourceRegion(composite.get(),0,r.left-bounds.left,r.top-bounds.top,0,image.get(),0,nullptr);
+        device_ctx->CopySubresourceRegion(composite.get(),0,tiled ? source.frame_x : r.left-bounds.left,tiled ? source.frame_y : r.top-bounds.top,0,image.get(),0,nullptr);
         source.ready = true; changed = true;
       }
       if (!changed || std::any_of(sources.begin(),sources.end(),[](const auto &s) { return !s.ready; })) return capture_e::timeout;
@@ -112,9 +153,26 @@ namespace platf::dxgi {
         HDC dc;
         if (FAILED(surface->GetDC(FALSE,&dc))) return capture_e::error;
         ICONINFO icon {};
-        if (GetIconInfo(cursor.hCursor,&icon)) {
-          DrawIconEx(dc,cursor.ptScreenPos.x-bounds.left-icon.xHotspot,
-            cursor.ptScreenPos.y-bounds.top-icon.yHotspot,cursor.hCursor,0,0,0,nullptr,DI_NORMAL);
+        // The cursor is drawn where its monitor sits in the frame; in a tiled frame that is
+        // the monitor's tile, and a cursor outside every captured monitor is left out.
+        int cursor_x = cursor.ptScreenPos.x-bounds.left, cursor_y = cursor.ptScreenPos.y-bounds.top;
+        bool cursor_on_frame = true;
+        if (tiled) {
+          cursor_on_frame = false;
+          for (const auto &source : sources) {
+            const auto r = source.desc.DesktopCoordinates;
+            if (cursor.ptScreenPos.x >= r.left && cursor.ptScreenPos.x < r.right &&
+                cursor.ptScreenPos.y >= r.top && cursor.ptScreenPos.y < r.bottom) {
+              cursor_x = source.frame_x + cursor.ptScreenPos.x-r.left;
+              cursor_y = source.frame_y + cursor.ptScreenPos.y-r.top;
+              cursor_on_frame = true;
+              break;
+            }
+          }
+        }
+        if (cursor_on_frame && GetIconInfo(cursor.hCursor,&icon)) {
+          DrawIconEx(dc,cursor_x-icon.xHotspot,
+            cursor_y-icon.yHotspot,cursor.hCursor,0,0,0,nullptr,DI_NORMAL);
           if (icon.hbmMask) DeleteObject(icon.hbmMask);
           if (icon.hbmColor) DeleteObject(icon.hbmColor);
         }

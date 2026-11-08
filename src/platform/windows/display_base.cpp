@@ -45,6 +45,22 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "utf_utils.h"
 
 namespace platf::dxgi {
+  namespace {
+    // The Sunshine virtual display's EDID manufacturer is "SDD", which shows in the monitor's
+    // device id. Reading it needs no driver access, so it cannot wait on the virtual-display
+    // locks that a running session holds.
+    bool is_sunshine_virtual_output(const std::string &gdi_name) {
+      const auto wide = utf_utils::from_utf8(gdi_name);
+      DISPLAY_DEVICEW monitor {};
+      monitor.cb = sizeof(monitor);
+      for (DWORD i = 0; EnumDisplayDevicesW(wide.c_str(), i, &monitor, 0); ++i) {
+        if (_wcsnicmp(monitor.DeviceID, L"MONITOR\\SDD", 11) == 0) return true;
+        monitor.cb = sizeof(monitor);
+      }
+      return false;
+    }
+  }  // namespace
+
   std::optional<desktop_manifest_t> query_multi_manifest(const std::string &requested) {
     if (!std::getenv("METEOR_WINDOWS_MULTIMONITOR")) return std::nullopt;
     factory1_t factory;
@@ -74,16 +90,31 @@ namespace platf::dxgi {
     }
     if (active_adapters != 1 || outputs.empty()) return std::nullopt;
     auto selected = split_csv(requested);
+    // A client's output list can name displays that no longer exist, or predate this
+    // session's virtual displays. Virtual displays are attached for the stream, so
+    // they always join the capture rather than depending on a stale label.
+    if (!selected.empty()) {
+      for (const auto &o : outputs) {
+        if (!o.capturable || std::find(selected.begin(), selected.end(), o.name) != selected.end()) continue;
+        if (is_sunshine_virtual_output(o.name)) selected.push_back(o.name);
+      }
+    }
     for (const auto &name : selected)
       if (std::none_of(outputs.begin(),outputs.end(),[&](const auto &o) { return o.name == name && o.capturable; })) return std::nullopt;
-    const auto region = compute_capture_region_from_outputs(outputs,GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),selected);
+    // Packs the monitors into rows when their bounding box is wider or taller than the HEVC
+    // decoder allows; a layout that already fits comes back unchanged.
+    const auto region = compute_packed_capture_region_from_outputs(outputs,GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),selected);
     if (!region.contiguous || region.width > k_max_capture_axis_px || region.height > k_max_capture_axis_px ||
         (int64_t)region.width*region.height > k_max_capture_total_px) return std::nullopt;
+    // Tell the client which monitors are session virtual displays, so it counts them as
+    // virtual rather than as physical monitors it could ask to capture by name.
+    auto marked_monitors = region.monitors;
+    for (auto &m : marked_monitors) m.is_virtual = is_sunshine_virtual_output(m.label);
     desktop_manifest_t result;
     result.frame_width = region.width; result.frame_height = region.height;
     result.desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN); result.desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     result.desktop_width = GetSystemMetrics(SM_CXVIRTUALSCREEN); result.desktop_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    result.monitors = region.monitors; result.contiguous = region.contiguous;
+    result.monitors = std::move(marked_monitors); result.contiguous = region.contiguous; result.tiled = region.tiled;
     return result;
   }
 }

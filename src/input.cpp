@@ -30,7 +30,7 @@ extern "C" {
 #include "thread_pool.h"
 #include "utility.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
   #include "platform/linux/display_manifest.h"
 #endif
 
@@ -651,6 +651,14 @@ namespace input {
     float final_x = (x + touch_port.offset_x * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
     float final_y = (y + touch_port.offset_y * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
 #else
+  #ifdef _WIN32
+    // Monitors tiled into one frame sit elsewhere on the desktop. The result is an absolute
+    // desktop position; the capture's offset (the virtual screen's origin) turns it into the
+    // coordinates the mouse API wants.
+    if (touch_port.frame_tiles) {
+      return platf::frame_to_desktop(*touch_port.frame_tiles, x / touch_port.scalar_tpcoords, y / touch_port.scalar_tpcoords);
+    }
+  #endif
     float final_x = x / touch_port.scalar_tpcoords;
     float final_y = y / touch_port.scalar_tpcoords;
 #endif

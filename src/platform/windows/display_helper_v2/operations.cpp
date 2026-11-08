@@ -383,6 +383,7 @@ namespace display_helper::v2 {
     }
 
     if (outcome.status == ApplyStatus::Ok) {
+      restore_requested_topology_members(request, token);
       apply_monitor_positions(request, token);
       apply_refresh_rate_overrides(request, token);
     }
@@ -392,6 +393,62 @@ namespace display_helper::v2 {
     }
 
     return outcome;
+  }
+
+  void ApplyOperation::restore_requested_topology_members(const ApplyRequest &request, const CancellationToken &token) {
+    if (token.is_cancelled()) {
+      return;
+    }
+
+    // The SettingsManager transaction rebuilds the topology from its cached baseline plus
+    // the one device it configures, so a session's additional virtual displays are switched
+    // off by it. The request names them in its base topology (launch) and in its monitor
+    // positions (launch and resume); put back any such device the transaction dropped, each
+    // as its own extended path.
+    std::vector<std::string> wanted_ids;
+    if (request.topology) {
+      for (const auto &group : *request.topology) {
+        wanted_ids.insert(wanted_ids.end(), group.begin(), group.end());
+      }
+    }
+    for (const auto &entry : request.monitor_positions) {
+      wanted_ids.push_back(entry.first);
+    }
+    if (wanted_ids.empty()) {
+      return;
+    }
+
+    const auto current = display_.capture_topology();
+    std::set<std::string> present;
+    for (const auto &group : current) {
+      present.insert(group.begin(), group.end());
+    }
+
+    ActiveTopology wanted = current;
+    std::vector<std::string> restored;
+    for (const auto &device_id : wanted_ids) {
+      if (device_id.empty() || present.contains(device_id)) {
+        continue;
+      }
+      wanted.push_back({device_id});
+      present.insert(device_id);
+      restored.push_back(device_id);
+    }
+    if (restored.empty()) {
+      return;
+    }
+
+    std::string ids;
+    for (const auto &id : restored) {
+      ids += (ids.empty() ? "" : ", ") + id;
+    }
+    if (!display_.topology_is_valid(wanted)) {
+      BOOST_LOG(warning) << "Display helper: topology with restored device(s) " << ids << " is not valid; leaving them inactive.";
+      return;
+    }
+    const auto status = display_.apply_topology(wanted);
+    BOOST_LOG(info) << "Display helper: re-activated " << restored.size() << " requested device(s) removed by the apply transaction: "
+                    << ids << " result=" << (status == ApplyStatus::Ok ? "true" : "false");
   }
 
   void ApplyOperation::apply_monitor_positions(const ApplyRequest &request, const CancellationToken &token) {

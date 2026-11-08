@@ -143,6 +143,10 @@ namespace rtsp_stream {
     bool virtual_display_recreated_on_demand = false;
     bool virtual_display_needs_resume_apply = false;
     std::optional<std::vector<std::vector<std::string>>> virtual_display_topology_snapshot;
+    /// Client-requested virtual displays beyond the primary one (`virtual_displays=N` on /launch, minus 1).
+    int extra_virtual_displays = 0;
+    /// Device ids of those extra displays once they exist.
+    std::vector<std::string> extra_virtual_display_device_ids;
 
     /// @brief Pre-virtual-display device refresh rates captured before VD creation.
     /// Maps device_id to {numerator, denominator} of the original refresh rate.
