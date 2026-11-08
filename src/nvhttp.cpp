@@ -4292,6 +4292,10 @@ namespace nvhttp {
      */
     std::optional<std::string> capture_outputs_error(const std::string &outputs) {
 #ifdef _WIN32
+      // "@virtual" asks for the session's virtual displays alone, which are created after this check.
+      if (outputs == capture_outputs::virtual_only_token) {
+        return std::nullopt;
+      }
       if (std::getenv("METEOR_WINDOWS_MULTIMONITOR") && !platf::dxgi::query_multi_manifest(outputs)) {
         return "Selected Windows monitors cannot be captured together by the experimental SDR DXGI backend";
       }
@@ -4932,7 +4936,10 @@ namespace nvhttp {
 #endif
       const bool allow_display_changes = true;
       auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
-      const auto requested_outputs = get_arg(args, "outputs", "");
+      // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
+      const auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                       std::string {capture_outputs::virtual_only_token} :
+                                       get_arg(args, "outputs", "");
       if (const auto error = capture_outputs_error(requested_outputs)) {
         BOOST_LOG(warning) << "Rejecting launch: "sv << *error;
         tree.put("root.<xmlattr>.status_code", 400);
@@ -5549,7 +5556,10 @@ namespace nvhttp {
         BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
       }
     }
-    const auto requested_outputs = get_arg(args, "outputs", "");
+    // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
+      const auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                       std::string {capture_outputs::virtual_only_token} :
+                                       get_arg(args, "outputs", "");
     if (const auto error = capture_outputs_error(requested_outputs)) {
       BOOST_LOG(warning) << "Rejecting resume: "sv << *error;
       tree.put("root.<xmlattr>.status_code", 400);

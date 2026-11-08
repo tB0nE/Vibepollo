@@ -7,8 +7,12 @@
 // standard includes
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace capture_outputs {
+
+  /// Stands in for the output list when only the session's virtual displays are captured.
+  inline constexpr std::string_view virtual_only_token = "@virtual";
 
   namespace detail {
     inline std::mutex mutex;

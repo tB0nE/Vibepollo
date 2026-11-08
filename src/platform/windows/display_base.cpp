@@ -90,10 +90,18 @@ namespace platf::dxgi {
     }
     if (active_adapters != 1 || outputs.empty()) return std::nullopt;
     auto selected = split_csv(requested);
-    // A client's output list can name displays that no longer exist, or predate this
-    // session's virtual displays. Virtual displays are attached for the stream, so
-    // they always join the capture rather than depending on a stale label.
-    if (!selected.empty()) {
+    const bool virtual_only = std::find(selected.begin(), selected.end(), std::string {capture_outputs::virtual_only_token}) != selected.end();
+    if (virtual_only) {
+      // The session's virtual displays and nothing else; the physical monitors stay on the desk.
+      selected.clear();
+      for (const auto &o : outputs) {
+        if (o.capturable && is_sunshine_virtual_output(o.name)) selected.push_back(o.name);
+      }
+      if (selected.empty()) return std::nullopt;
+    } else if (!selected.empty()) {
+      // A client's output list can name displays that no longer exist, or predate this
+      // session's virtual displays. Virtual displays are attached for the stream, so
+      // they always join the capture rather than depending on a stale label.
       for (const auto &o : outputs) {
         if (!o.capturable || std::find(selected.begin(), selected.end(), o.name) != selected.end()) continue;
         if (is_sunshine_virtual_output(o.name)) selected.push_back(o.name);
@@ -104,12 +112,21 @@ namespace platf::dxgi {
     // Packs the monitors into rows when their bounding box is wider or taller than the HEVC
     // decoder allows; a layout that already fits comes back unchanged.
     const auto region = compute_packed_capture_region_from_outputs(outputs,GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),selected);
-    if (!region.contiguous || region.width > k_max_capture_axis_px || region.height > k_max_capture_axis_px ||
+    if ((!region.contiguous && !virtual_only) || region.width > k_max_capture_axis_px || region.height > k_max_capture_axis_px ||
         (int64_t)region.width*region.height > k_max_capture_total_px) return std::nullopt;
     // Tell the client which monitors are session virtual displays, so it counts them as
     // virtual rather than as physical monitors it could ask to capture by name.
     auto marked_monitors = region.monitors;
     for (auto &m : marked_monitors) m.is_virtual = is_sunshine_virtual_output(m.label);
+    if (virtual_only) {
+      // The physical monitor at the desktop origin is not in the frame, so the first screen
+      // that is takes its place as primary (clients and Meteor's depth both follow this flag).
+      bool taken = false;
+      for (auto &m : marked_monitors) {
+        m.is_primary = m.enabled && !taken;
+        taken = taken || m.is_primary;
+      }
+    }
     desktop_manifest_t result;
     result.frame_width = region.width; result.frame_height = region.height;
     result.desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN); result.desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
