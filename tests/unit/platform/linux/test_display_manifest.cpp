@@ -166,3 +166,17 @@ TEST(DisplayManifest, SplitsOutputLists) {
   EXPECT_TRUE(platf::split_csv("").empty());
   EXPECT_TRUE(platf::split_csv(" , ").empty());
 }
+
+TEST(DisplayManifestPacking, MonitorsOnADiagonalArePackedIntoOneRowEvenThoughTheyFit) {
+  const std::vector<platf::output_descriptor_t> outputs {
+    output("A", 0, 0, 2560, 1440, true),
+    output("B", 2560, 1440, 2560, 1440, false),
+    output("C", 5120, 2880, 2560, 1440, false),
+  };
+  const auto region = platf::compute_packed_capture_region_from_outputs(outputs, 7680, 4320, {});
+
+  EXPECT_TRUE(region.tiled);
+  EXPECT_EQ(std::tuple(region.width, region.height), std::tuple(7680, 1440));
+  EXPECT_EQ(frame_rect(monitor(region, "C")), std::tuple(5120, 0, 2560, 1440));
+  EXPECT_EQ(monitor(region, "C").desktop_y, 2880);
+}

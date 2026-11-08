@@ -182,15 +182,21 @@ namespace platf {
       return (max_axis_px <= 0 || (w <= max_axis_px && h <= max_axis_px)) &&
              (max_total_px <= 0 || static_cast<long long>(w) * h <= max_total_px);
     };
-    if (max_axis_px <= 0 || fits(region.width, region.height)) {
-      return region;
-    }
-
     std::vector<monitor_manifest_entry_t *> enabled;
+    long long monitor_area = 0;
     for (auto &m : region.monitors) {
       if (m.enabled) {
         enabled.push_back(&m);
+        monitor_area += static_cast<long long>(m.desktop_w) * m.desktop_h;
       }
+    }
+    // Monitors scattered over the desktop (virtual displays sit diagonally or far off-screen)
+    // leave most of their bounding box empty. Capturing, converting and encoding that empty
+    // space costs several times the pixels, so such layouts are packed even when they fit.
+    const bool sparse = enabled.size() > 1 &&
+      static_cast<long long>(region.width) * region.height * 2 > monitor_area * 3;
+    if (max_axis_px <= 0 || (fits(region.width, region.height) && !sparse)) {
+      return region;
     }
     if (enabled.size() <= 1) {
       return region;
@@ -213,7 +219,7 @@ namespace platf {
     // The first row count that fits, else the one with the smallest longest side.
     std::size_t best_cols = enabled.size();
     auto best = std::pair {region.width, region.height};
-    for (std::size_t rows = 2; rows <= enabled.size(); ++rows) {
+    for (std::size_t rows = sparse ? 1 : 2; rows <= enabled.size(); ++rows) {
       const auto cols = (enabled.size() + rows - 1) / rows;
       const auto size = canvas(cols);
       if (fits(size.first, size.second)) {
