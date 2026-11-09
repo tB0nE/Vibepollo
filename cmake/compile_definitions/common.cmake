@@ -299,6 +299,16 @@ elseif(APPLE)
     endforeach()
 endif()
 
+# BEFORE prepends each directory in turn, so later entries are searched first. On macOS
+# Opus_INCLUDE_DIR is Homebrew's shared include folder, whose openssl/ is whichever major
+# version Homebrew linked last (openssl@4 comes with Node 26), not the one the build links:
+# OpenSSL goes after Opus there, so its own headers win.
+if(APPLE)
+    set(SUNSHINE_SSL_AND_OPUS_INCLUDE_DIRS ${Opus_INCLUDE_DIR} ${OPENSSL_INCLUDE_DIR})
+else()
+    set(SUNSHINE_SSL_AND_OPUS_INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR} ${Opus_INCLUDE_DIR})
+endif()
+
 include_directories(
         BEFORE
         SYSTEM
@@ -309,8 +319,7 @@ include_directories(
         ${WEBRTC_INCLUDE_DIRS}
         ${SQLITE3_INCLUDE_DIRS}
         ${SUNSHINE_FFMPEG_INCLUDE_DIRS}
-        ${OPENSSL_INCLUDE_DIR}
-        ${Opus_INCLUDE_DIR}
+        ${SUNSHINE_SSL_AND_OPUS_INCLUDE_DIRS}
         ${Boost_INCLUDE_DIRS}  # has to be the last, or we get runtime error on macOS ffmpeg encoder
 )
 

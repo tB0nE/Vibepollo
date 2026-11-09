@@ -48,15 +48,18 @@
 
   self.displayID = displayID;
   self.pixelFormat = kCVPixelFormatType_32BGRA;
-  self.frameWidth = (int) CGDisplayModeGetPixelWidth(mode);
-  self.frameHeight = (int) CGDisplayModeGetPixelHeight(mode);
+  // A virtual display (CGVirtualDisplay) can report no mode; its size is still known.
+  self.frameWidth = mode ? (int) CGDisplayModeGetPixelWidth(mode) : (int) CGDisplayPixelsWide(displayID);
+  self.frameHeight = mode ? (int) CGDisplayModeGetPixelHeight(mode) : (int) CGDisplayPixelsHigh(displayID);
   self.minFrameDuration = CMTimeMake(1, frameRate);
   self.session = [[AVCaptureSession alloc] init];
   self.videoOutputs = [[NSMapTable alloc] init];
   self.captureCallbacks = [[NSMapTable alloc] init];
   self.captureSignals = [[NSMapTable alloc] init];
 
-  CFRelease(mode);
+  if (mode) {
+    CFRelease(mode);
+  }
 
   AVCaptureScreenInput *screenInput = [[AVCaptureScreenInput alloc] initWithDisplayID:self.displayID];
   [screenInput setMinFrameDuration:self.minFrameDuration];

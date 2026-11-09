@@ -8,6 +8,7 @@
 #include "src/platform/common.h"
 #include "src/platform/macos/av_img_t.h"
 #include "src/platform/macos/av_video.h"
+#include "src/platform/macos/display_layout.h"
 #include "src/platform/macos/misc.h"
 #include "src/platform/macos/nv12_zero_device.h"
 
@@ -20,6 +21,8 @@ namespace fs = std::filesystem;
 
 namespace platf {
   using namespace std::literals;
+
+  std::shared_ptr<display_t> create_multi_display(const video::config_t &config);
 
   struct av_display_t: public display_t {
     AVVideo *av_capture {};
@@ -161,6 +164,15 @@ namespace platf {
     if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::videotoolbox) {
       BOOST_LOG(error) << "Could not initialize display with the given hw device type."sv;
       return nullptr;
+    }
+
+    // Nightfall Meteor's multi-monitor capture: the session's planned screens in one frame.
+    if (macos::multimonitor_enabled()) {
+      if (hwdevice_type != platf::mem_type_e::videotoolbox) {
+        BOOST_LOG(error) << "Multi-display capture requires the VideoToolbox encoder"sv;
+        return nullptr;
+      }
+      return create_multi_display(config);
     }
 
     auto display = std::make_shared<av_display_t>();

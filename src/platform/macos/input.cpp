@@ -23,6 +23,7 @@
 #include "src/input.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/macos/display_layout.h"
 #include "src/utility.h"
 
 /**
@@ -383,8 +384,11 @@ const KeyCodeMap kKeyCodesMap[] = {
     const auto display = macos_input->display;
     const auto event = macos_input->mouse_event;
 
-    // get display bounds for current display
-    const CGRect display_bounds = CGDisplayBounds(display);
+    // get display bounds for current display, or every display a multi-display capture streams
+    CGRect display_bounds = CGDisplayBounds(display);
+    if (const auto bounds = macos::input_bounds()) {
+      display_bounds = CGRectMake((*bounds)[0], (*bounds)[1], (*bounds)[2], (*bounds)[3]);
+    }
 
     // limit mouse to current display bounds
     const auto location = CGPoint {
@@ -446,6 +450,12 @@ const KeyCodeMap kKeyCodesMap[] = {
     const auto macos_input = static_cast<macos_input_t *>(input.get());
     const auto scaling = macos_input->displayScaling;
     const auto display = macos_input->display;
+
+    // Several displays in one frame: each tile maps to its own display, at its own scale.
+    if (const auto desktop = macos::frame_to_desktop(x, y)) {
+      post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), {desktop->first, desktop->second}, get_mouse_loc(input), 0);
+      return;
+    }
 
     auto location = util::point_t {x * scaling, y * scaling};
     CGRect display_bounds = CGDisplayBounds(display);
@@ -639,9 +649,12 @@ const KeyCodeMap kKeyCodesMap[] = {
     }
 
     // Input coordinates are based on the virtual resolution not the physical, so we need the scaling factor
+    // A virtual display can report no mode: one point per pixel, as Meteor makes them.
     const CGDisplayModeRef mode = CGDisplayCopyDisplayMode(macos_input->display);
-    macos_input->displayScaling = ((CGFloat) CGDisplayPixelsWide(macos_input->display)) / ((CGFloat) CGDisplayModeGetPixelWidth(mode));
-    CFRelease(mode);
+    macos_input->displayScaling = mode ? ((CGFloat) CGDisplayPixelsWide(macos_input->display)) / ((CGFloat) CGDisplayModeGetPixelWidth(mode)) : 1.0;
+    if (mode) {
+      CFRelease(mode);
+    }
 
     macos_input->source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     macos_input->keyboard_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
