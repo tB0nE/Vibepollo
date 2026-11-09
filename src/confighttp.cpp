@@ -6117,7 +6117,8 @@ namespace confighttp {
         if (!authenticate(response, request)) {
           return;
         }
-        blocking_route_pool.push([handler, response = std::move(response), request = std::move(request)]() mutable {
+        // Decay: a plain function can't be captured by copy (clang rejects it).
+        blocking_route_pool.push([handler = std::decay_t<decltype(handler)>(handler), response = std::move(response), request = std::move(request)]() mutable {
           try {
             handler(response, request);
           } catch (const std::exception &e) {

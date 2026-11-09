@@ -285,6 +285,18 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     foreach(ffmpeg_dir IN LISTS FFMPEG_INCLUDE_DIRS)
         add_compile_options("-isystem" "${ffmpeg_dir}")
     endforeach()
+elseif(APPLE)
+    # Homebrew's opus/png/jpeg resolve to /opt/homebrew/include, which also holds
+    # the headers of a Homebrew FFmpeg (often older, without AV_PROFILE_* or
+    # AV_FRAME_FLAG_KEY). -I directories are searched before every -isystem one,
+    # so the prepared FFmpeg wins; clang still treats them as system headers.
+    set(SUNSHINE_FFMPEG_INCLUDE_DIRS "")
+    foreach(ffmpeg_dir IN LISTS FFMPEG_INCLUDE_DIRS)
+        add_compile_options("-I${ffmpeg_dir}")
+    endforeach()
+    foreach(ffmpeg_prefix IN ITEMS libavcodec/ libavutil/ libavformat/ libavfilter/ libavdevice/ libswscale/ libswresample/)
+        add_compile_options("--system-header-prefix=${ffmpeg_prefix}")
+    endforeach()
 endif()
 
 include_directories(
