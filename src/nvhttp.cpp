@@ -4965,9 +4965,25 @@ namespace nvhttp {
       const bool allow_display_changes = true;
       auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
       // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
-      const auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
-                                       std::string {capture_outputs::virtual_only_token} :
-                                       get_arg(args, "outputs", "");
+      auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                 std::string {capture_outputs::virtual_only_token} :
+                                 get_arg(args, "outputs", "");
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
+      // monitors. Only the first viewer of a session decides what it captures.
+      if (!has_stream_session_activity()) {
+        std::string virtual_error;
+        if (auto prepared = platf::kwin_prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          requested_outputs = std::move(*prepared);
+        } else {
+          BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
+#endif
       if (const auto error = capture_outputs_error(requested_outputs)) {
         BOOST_LOG(warning) << "Rejecting launch: "sv << *error;
         tree.put("root.<xmlattr>.status_code", 400);
@@ -5597,9 +5613,25 @@ namespace nvhttp {
       }
     }
     // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
-      const auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
-                                       std::string {capture_outputs::virtual_only_token} :
-                                       get_arg(args, "outputs", "");
+      auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                 std::string {capture_outputs::virtual_only_token} :
+                                 get_arg(args, "outputs", "");
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
+      // monitors. Only the first viewer of a session decides what it captures.
+      if (!has_stream_session_activity()) {
+        std::string virtual_error;
+        if (auto prepared = platf::kwin_prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          requested_outputs = std::move(*prepared);
+        } else {
+          BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.resume", 0);
+          return;
+        }
+      }
+#endif
     if (const auto error = capture_outputs_error(requested_outputs)) {
       BOOST_LOG(warning) << "Rejecting resume: "sv << *error;
       tree.put("root.<xmlattr>.status_code", 400);
@@ -6437,7 +6469,22 @@ namespace nvhttp {
     }
 #endif
   #ifdef SUNSHINE_BUILD_KWIN
-    manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+    {
+      // With launch options in the query (outputs, virtual_displays, virtual_only) this is the
+      // layout a launch with them would get, so a client can request exactly that stream size.
+      const auto args = request->parse_query_string();
+      const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
+                                 args.find("virtual_only") != args.end();
+      if (asks_for_plan) {
+        const bool virtual_only = get_arg(args, "virtual_only", "") == "1";
+        const int count = requested_virtual_count(args);
+        manifest = count > 0 || virtual_only ? platf::kwin_plan_manifest(get_arg(args, "outputs", ""), count, virtual_only) :
+                                               platf::kwin_query_desktop_manifest(get_arg(args, "outputs", ""));
+        output["planned"] = true;
+      } else {
+        manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+      }
+    }
   #endif
   #ifdef SUNSHINE_BUILD_X11
     if (!manifest) {

@@ -43,6 +43,8 @@ namespace platf {
     bool capturable = true;
     /// Wayland mode size divided by scale gives compositor-logical size; X11 stays 1.0.
     double scale = 1.0;
+    /// A virtual display created for the session (see kwin_virtual_layout.h).
+    bool is_virtual = false;
   };
 
   /**
@@ -103,6 +105,7 @@ namespace platf {
       entry.id = "m" + std::to_string(index++);
       entry.label = out.name.empty() ? entry.id : out.name;
       entry.is_primary = out.primary;
+      entry.is_virtual = out.is_virtual;
       entry.capturable = out.capturable;
       entry.desktop_x = out.x;
       entry.desktop_y = out.y;

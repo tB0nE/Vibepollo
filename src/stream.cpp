@@ -81,6 +81,9 @@ extern "C" {
   #include "platform/linux/private_display.h"
   #include "platform/linux/wayland_hdr_compatibility.h"
   #include "src/platform/linux/display_backend.h"
+  #ifdef SUNSHINE_BUILD_KWIN
+    #include "platform/linux/kwin_workspace.h"
+  #endif
 #endif
 
 #define IDX_START_A 0
@@ -301,6 +304,9 @@ namespace stream {
     g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel);
 #elif defined(__linux__)
     platf::linux_display::backend().cancel_scheduled_revert();
+  #ifdef SUNSHINE_BUILD_KWIN
+    platf::kwin_cancel_virtual_outputs_release();
+  #endif
 #endif
   }
 
@@ -3295,6 +3301,9 @@ namespace stream {
           std::chrono::seconds(paused_timeout_secs),
           "paused-session timeout"
         );
+  #ifdef SUNSHINE_BUILD_KWIN
+        platf::kwin_schedule_virtual_outputs_release(std::chrono::seconds(paused_timeout_secs));
+  #endif
       } else if (keep_virtual_display_due_to_pause) {
         BOOST_LOG(debug) << "Linux private display: keeping the private output active for resume.";
       } else {
@@ -3303,8 +3312,16 @@ namespace stream {
             config::video.dd.config_revert_delay,
             "stream-end delay"
           );
+  #ifdef SUNSHINE_BUILD_KWIN
+          platf::kwin_schedule_virtual_outputs_release(
+            std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+          );
+  #endif
         } else {
           (void) platf::linux_display::backend().revert();
+  #ifdef SUNSHINE_BUILD_KWIN
+          platf::kwin_release_virtual_outputs();
+  #endif
         }
       }
 #else
