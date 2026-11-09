@@ -38,7 +38,10 @@
       return screen.localizedName;
     }
   }
-  return nil;
+  // NSScreen doesn't list every display: a CGVirtualDisplay made by this process, or one
+  // that attached after NSScreen last updated (no AppKit run loop here). Never nil: callers
+  // put it in dictionary literals, which throw on nil.
+  return [NSString stringWithFormat:@"Display %u", displayID];
 }
 
 - (id)initWithDisplay:(CGDirectDisplayID)displayID frameRate:(int)frameRate {

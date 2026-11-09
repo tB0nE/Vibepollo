@@ -778,6 +778,10 @@ namespace platf::macos {
       std::printf("display id=%u name=%s virtual=%d primary=%d pixels=%dx%d points=%g,%g,%gx%g\n", o.id, o.name.c_str(),
                   o.is_virtual, o.primary, o.width, o.height, o.x, o.y, o.points_w, o.points_h);
     }
+    // What a stream's refresh_displays() calls; it threw on a virtual display NSScreen didn't know.
+    for (const auto &name : platf::display_names(mem_type_e::videotoolbox)) {
+      std::printf("display_names: %s\n", name.c_str());
+    }
     auto plan = make_plan(outputs, virtual_count);
     if (!plan) {
       std::fprintf(stderr, "no plan\n");
