@@ -423,6 +423,7 @@ namespace pipewire {
     }
 
     void set_cursor_metadata(bool enabled) { stream_data.cursor_metadata = enabled; }
+    void set_fixed_max_framerate(int hz) { fixed_max_framerate_ = hz; }
 
     void set_negotiate_maxframerate(bool negotiate_maxframerate) {
       negotiate_maxframerate_ = negotiate_maxframerate;
@@ -453,6 +454,7 @@ namespace pipewire {
     uint32_t node = PW_ID_ANY;
     uint64_t object_serial = SPA_ID_INVALID;
     bool negotiate_maxframerate_ = true;
+    int fixed_max_framerate_ = 0;
     bool gamescope_requested_size_ = false;
     bool force_sdr_formats_ = false;
     bool force_hdr10_formats_ = false;
@@ -475,7 +477,7 @@ namespace pipewire {
         // Valve's private SPA_FORMAT_VIDEO_requested_size property.
         spa_pod_builder_add(b, 0x70000, SPA_POD_Rectangle(&sizes[0]), 0);
       }
-      add_framerate_parameters(b, negotiate_maxframerate_);
+      add_framerate_parameters(b, negotiate_maxframerate_, fixed_max_framerate_);
 
       if (format == SPA_VIDEO_FORMAT_xBGR_210LE) {
         spa_pod_builder_add(b, SPA_FORMAT_VIDEO_colorPrimaries, SPA_POD_Id(SPA_VIDEO_COLOR_PRIMARIES_BT2020), 0);
@@ -1130,7 +1132,7 @@ namespace pipewire {
       return false;
     }
 
-  private:
+  protected:  // pipewire_multi::source_display_t starts its stream and reads frames itself.
     bool is_buffer_redundant(const egl::img_descriptor_t *img) {
       // Check for corrupted frame
       if (img->pw_flags.has_value() && (img->pw_flags.value() & SPA_CHUNK_FLAG_CORRUPTED)) {

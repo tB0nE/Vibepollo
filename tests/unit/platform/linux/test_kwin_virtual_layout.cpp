@@ -187,3 +187,14 @@ TEST(KwinVirtualLayout, VirtualOnlyFourMakesATwoByTwoGrid) {
   EXPECT_EQ(layout->workspace.manifest.frame_height, 2880);
   EXPECT_FALSE(find(*layout, "DP-1")->enabled);
 }
+
+TEST(KwinVirtualLayout, PackedSkipsMonitorsInBetweenAndRectangleLimits) {
+  std::string error;
+  // DP-3 sits between DP-1 and the row, and four virtual monitors are wider than one stream.
+  const auto layout = kv::plan(two_side_by_side, {"DP-1"}, 4, false, error, true);
+  ASSERT_TRUE(layout) << error;
+  EXPECT_EQ(layout->selected, (std::vector<std::string> {"DP-1", "Virtual-Nightfall-Virtual-1", "Virtual-Nightfall-Virtual-2",
+                                                         "Virtual-Nightfall-Virtual-3", "Virtual-Nightfall-Virtual-4"}));
+  EXPECT_EQ(layout->outputs.back().x, 5120 + 3 * 2560);
+  EXPECT_EQ(layout->outputs.back().y, 0);
+}

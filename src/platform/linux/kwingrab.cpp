@@ -47,6 +47,8 @@
 #include "wayland_workspace.h"
 #include "src/capture_outputs.h"
 #include "pipewire.cpp"
+#include "pipewire_multi.cpp"
+#include "src/display_plan.h"
 #include "private_display.h"
 #include "private_display_capture_policy.h"
 #include "src/platform/common.h"
@@ -1257,6 +1259,75 @@ namespace kwin {
     return false;
   }
 
+  /// The output a plan screen streams: its own name, or the virtual monitor KWin made for it.
+  std::string plan_output_name(const display_plan::screen_t &screen) {
+    return screen.is_virtual ? platf::kwin_virtual::output_name(screen.virtual_index) : screen.label;
+  }
+
+  /// Writes the plan's primary rectangle for Meteor's depth crop (see publish_capture_region()).
+  void publish_plan_region(const display_plan::plan_t &plan) {
+    platf::wayland_workspace_t workspace;
+    workspace.manifest.frame_width = plan.frame_width;
+    workspace.manifest.frame_height = plan.frame_height;
+    for (const auto *screen : plan.enabled()) {
+      platf::monitor_manifest_entry_t entry;
+      entry.enabled = true;
+      entry.is_primary = screen->is_primary;
+      entry.frame_x = screen->frame_x;
+      entry.frame_y = screen->frame_y;
+      entry.frame_w = screen->width;
+      entry.frame_h = screen->height;
+      workspace.manifest.monitors.push_back(entry);
+    }
+    publish_capture_region(workspace);
+  }
+
+  /**
+   * Several screens, each its own KWin stream, packed into the plan's frame. KWin streams one
+   * output at that output's rate, so any set of monitors and virtual monitors keeps full rate.
+   */
+  class packed_t: public pipewire_multi::multi_display_t {
+  public:
+    int init(platf::mem_type_e type, const display_plan::plan_t &plan, const ::video::config_t &config) {
+      screencast_t probe;
+      if (probe.init(true) < 0) {
+        return -1;
+      }
+      const auto descriptors = output_descriptors(probe).value_or(std::vector<platf::output_descriptor_t> {});
+      std::vector<pipewire_multi::screen_source_t> sources;
+      for (const auto *screen : plan.enabled()) {
+        const auto name = plan_output_name(*screen);
+        auto cast = std::make_unique<screencast_t>();
+        if (cast->init(false) < 0 || cast->start(name) < 0 || !cast->out_params || cast->out_params->name != name) {
+          BOOST_LOG(error) << "[kwingrab] Can't stream output "sv << name << " for the packed frame"sv;
+          return -1;
+        }
+        pipewire_multi::screen_source_t source;
+        source.label = name;
+        source.node = cast->out_node_id;
+        source.serial = cast->out_objectserial;
+        source.frame_x = screen->frame_x;
+        source.frame_y = screen->frame_y;
+        source.width = screen->width;
+        source.height = screen->height;
+        const auto at = std::find_if(descriptors.begin(), descriptors.end(), [&](const auto &out) {
+          return out.name == name;
+        });
+        source.desktop_x = at != descriptors.end() ? at->x : cast->out_params->pos_x;
+        source.desktop_y = at != descriptors.end() ? at->y : cast->out_params->pos_y;
+        sources.push_back(source);
+        casts.push_back(std::move(cast));
+      }
+      publish_plan_region(plan);
+      BOOST_LOG(info) << "[kwingrab] Packing "sv << sources.size() << " screens into "sv << plan.frame_width << 'x' << plan.frame_height;
+      return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config);
+    }
+
+  private:
+    // Each holds its output's KWin stream open for as long as capture runs.
+    std::vector<std::unique_ptr<screencast_t>> casts;
+  };
+
   /**
    * Display backend
    *
@@ -1353,6 +1424,16 @@ namespace platf {
       return nullptr;
     }
 
+    // A session of several screens packs each screen's own stream (see packed_t).
+    if (const auto plan = display_plan::get(); plan && plan->enabled().size() > 1) {
+      auto packed = std::make_shared<kwin::packed_t>();
+      if (packed->init(hwdevice_type, *plan, config)) {
+        BOOST_LOG(error) << "[kwingrab] Couldn't start the packed capture"sv;
+        return nullptr;
+      }
+      return packed;
+    }
+
     auto display = std::make_shared<kwin::kwin_t>();
     if (display->init(hwdevice_type, display_name, config)) {
       return nullptr;
@@ -1394,8 +1475,9 @@ namespace platf {
     if (!config::video.capture.empty() && config::video.capture != "kwin") {
       return "Wayland outputs= selection currently requires automatic or KWin capture";
     }
-    if (!kwin_query_desktop_manifest(outputs)) {
-      return "Wayland outputs= selection needs KWin region capture, valid adjacent outputs and a layout within decoder limits";
+    // Several outputs are packed (packed_t), so any set works; the plan checks the frame fits.
+    if (!kwin_make_plan(outputs, 0)) {
+      return "Wayland outputs= selection names no output KWin knows, or doesn't fit one stream";
     }
     return std::nullopt;
   }
@@ -1450,21 +1532,114 @@ namespace platf {
         return std::nullopt;
       }
       const bool virtual_only = outputs == capture_outputs::virtual_only_token;
-      return kwin_virtual::plan(*descriptors, virtual_only ? std::vector<std::string> {} : split_csv(outputs), count, virtual_only, error);
+      // Each screen is captured on its own and packed (packed_t), so the row only has to sit beside the desktop.
+      return kwin_virtual::plan(*descriptors, virtual_only ? std::vector<std::string> {} : split_csv(outputs), count, virtual_only, error, true);
     }
   }  // namespace
 
+  std::optional<display_plan::plan_t> kwin_make_plan(const std::string &outputs, int virtual_count) {
+    if (window_system != window_system_e::WAYLAND || (!config::video.capture.empty() && config::video.capture != "kwin")) {
+      return std::nullopt;
+    }
+    kwin::screencast_t screencast;
+    if (screencast.init(false) < 0 || !screencast.kwin_available()) {
+      return std::nullopt;
+    }
+    const auto descriptors = kwin::output_descriptors(screencast);
+    if (!descriptors) {
+      return std::nullopt;
+    }
+    std::vector<display_plan::physical_t> physical;
+    for (const auto &out : *descriptors) {
+      if (!kwin_virtual::is_virtual_output(out.name)) {
+        physical.push_back({out.name, out.x, out.y, out.width, out.height, out.primary});
+      }
+    }
+    const bool virtual_only = outputs == capture_outputs::virtual_only_token;
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(outputs), virtual_count, virtual_only);
+  }
+
+  /// A plan as a manifest: frame rects from the plan, desktop rects from `outputs`.
+  std::optional<desktop_manifest_t> plan_manifest(const display_plan::plan_t &plan, const std::vector<output_descriptor_t> &outputs) {
+    desktop_manifest_t manifest;
+    manifest.frame_width = plan.frame_width;
+    manifest.frame_height = plan.frame_height;
+    manifest.tiled = true;
+    manifest.any_selection = true;
+    int min_x = INT_MAX, min_y = INT_MAX, max_x = INT_MIN, max_y = INT_MIN;
+    for (const auto &screen : plan.screens) {
+      monitor_manifest_entry_t entry;
+      entry.id = screen.id;
+      entry.label = screen.is_virtual ? kwin_virtual::output_name(screen.virtual_index) : screen.label;
+      entry.enabled = screen.enabled;
+      entry.is_primary = screen.is_primary;
+      entry.is_virtual = screen.is_virtual;
+      if (screen.enabled) {
+        entry.frame_x = screen.frame_x;
+        entry.frame_y = screen.frame_y;
+        entry.frame_w = screen.width;
+        entry.frame_h = screen.height;
+      }
+      entry.desktop_w = screen.width;
+      entry.desktop_h = screen.height;
+      const auto at = std::find_if(outputs.begin(), outputs.end(), [&](const auto &out) {
+        return out.name == entry.label;
+      });
+      if (at != outputs.end()) {
+        entry.desktop_x = at->x;
+        entry.desktop_y = at->y;
+        entry.desktop_w = at->width;
+        entry.desktop_h = at->height;
+      }
+      min_x = std::min(min_x, entry.desktop_x);
+      min_y = std::min(min_y, entry.desktop_y);
+      max_x = std::max(max_x, entry.desktop_x + entry.desktop_w);
+      max_y = std::max(max_y, entry.desktop_y + entry.desktop_h);
+      manifest.monitors.push_back(entry);
+    }
+    if (manifest.monitors.empty()) {
+      return std::nullopt;
+    }
+    manifest.desktop_x = min_x;
+    manifest.desktop_y = min_y;
+    manifest.desktop_width = max_x - min_x;
+    manifest.desktop_height = max_y - min_y;
+    return manifest;
+  }
+
   std::optional<desktop_manifest_t> kwin_plan_manifest(const std::string &outputs, int count, bool virtual_only) {
-    if (!kwin_virtual_outputs_supported()) {
+    const auto request = virtual_only ? std::string {capture_outputs::virtual_only_token} : outputs;
+    const auto plan = kwin_make_plan(request, count);
+    if (!plan) {
       return std::nullopt;
     }
+    // Where the virtual monitors will sit, before they exist.
     std::string error;
-    const auto layout = virtual_layout(virtual_only ? std::string {capture_outputs::virtual_only_token} : outputs, count, error);
-    if (!layout) {
-      BOOST_LOG(info) << "[kwin-virtual] No plan for outputs=["sv << outputs << "] virtual="sv << count << ": "sv << error;
+    std::vector<output_descriptor_t> positions;
+    if (count > 0 || virtual_only) {
+      if (const auto layout = virtual_layout(request, count, error)) {
+        positions = layout->outputs;
+      }
+    } else {
+      kwin::screencast_t screencast;
+      if (screencast.init(false) == 0) {
+        positions = kwin::output_descriptors(screencast).value_or(std::vector<output_descriptor_t> {});
+      }
+    }
+    return plan_manifest(*plan, positions);
+  }
+
+  std::optional<desktop_manifest_t> kwin_session_manifest() {
+    const auto plan = display_plan::get();
+    if (!plan || plan->enabled().size() < 2) {
       return std::nullopt;
     }
-    return layout->workspace.manifest;
+    kwin::screencast_t screencast;
+    std::vector<output_descriptor_t> positions;
+    if (screencast.init(false) == 0) {
+      positions = kwin::output_descriptors(screencast).value_or(std::vector<output_descriptor_t> {});
+    }
+    return plan_manifest(*plan, positions);
   }
 
   std::optional<std::string> kwin_prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error) {

@@ -84,6 +84,9 @@ extern "C" {
   #ifdef SUNSHINE_BUILD_KWIN
     #include "platform/linux/kwin_workspace.h"
   #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+    #include "platform/linux/mutter_workspace.h"
+  #endif
 #endif
 
 #define IDX_START_A 0
@@ -306,6 +309,9 @@ namespace stream {
     platf::linux_display::backend().cancel_scheduled_revert();
   #ifdef SUNSHINE_BUILD_KWIN
     platf::kwin_cancel_virtual_outputs_release();
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+    platf::mutter_cancel_virtual_outputs_release();
   #endif
 #endif
   }
@@ -3304,6 +3310,9 @@ namespace stream {
   #ifdef SUNSHINE_BUILD_KWIN
         platf::kwin_schedule_virtual_outputs_release(std::chrono::seconds(paused_timeout_secs));
   #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+        platf::mutter_schedule_virtual_outputs_release(std::chrono::seconds(paused_timeout_secs));
+  #endif
       } else if (keep_virtual_display_due_to_pause) {
         BOOST_LOG(debug) << "Linux private display: keeping the private output active for resume.";
       } else {
@@ -3317,10 +3326,18 @@ namespace stream {
             std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
           );
   #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+          platf::mutter_schedule_virtual_outputs_release(
+            std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+          );
+  #endif
         } else {
           (void) platf::linux_display::backend().revert();
   #ifdef SUNSHINE_BUILD_KWIN
           platf::kwin_release_virtual_outputs();
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+          platf::mutter_release_virtual_outputs();
   #endif
         }
       }

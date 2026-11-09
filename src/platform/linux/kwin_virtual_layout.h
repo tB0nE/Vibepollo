@@ -58,13 +58,18 @@ namespace platf::kwin_virtual {
    * @param count How many virtual monitors, each the size of the main monitor.
    * @param virtual_only Capture the virtual monitors alone; the first becomes the primary.
    * @param error Why there is no layout, when there isn't.
+   * @param packed Each screen is captured on its own and packed into the frame
+   *               (pipewire_multi.cpp), so the virtual row only has to sit beside the desktop:
+   *               no monitor in between is added and no single rectangle has to fit a stream.
+   *               `workspace` is then left empty.
    */
   inline std::optional<layout_t> plan(
     std::vector<output_descriptor_t> physical,
     std::vector<std::string> chosen,
     int count,
     bool virtual_only,
-    std::string &error
+    std::string &error,
+    bool packed = false
   ) {
     std::erase_if(physical, [](const auto &out) {
       return out.is_virtual || is_virtual_output(out.name);
@@ -170,6 +175,20 @@ namespace platf::kwin_virtual {
       result.workspace = std::move(*workspace);
       return result;
     };
+
+    if (packed) {
+      layout_t result;
+      result.outputs = base;
+      for (int i = 1; i <= count; ++i) {
+        result.outputs.push_back(make_virtual(i, right + (i - 1) * main->width, top));
+      }
+      for (const auto &out : result.outputs) {
+        if (out.is_virtual || std::find(chosen.begin(), chosen.end(), out.name) != chosen.end()) {
+          result.selected.push_back(out.name);
+        }
+      }
+      return result;
+    }
 
     // One row at the desktop's right edge when it fits, as Windows uses one row when it can.
     {

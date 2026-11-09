@@ -82,6 +82,9 @@
   #include "platform/linux/private_display_resume_policy.h"
   #ifdef SUNSHINE_BUILD_KWIN
     #include "platform/linux/kwin_workspace.h"
+    #ifdef SUNSHINE_BUILD_MUTTER
+      #include "platform/linux/mutter_workspace.h"
+    #endif
   #endif
   #ifdef SUNSHINE_BUILD_X11
     #include "platform/linux/x11grab.h"
@@ -4285,12 +4288,71 @@ namespace nvhttp {
       }
     }
 
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+    /// KDE Plasma (KWin) or GNOME (Mutter): the compositor whose screens a session streams.
+    namespace linux_desktop {
+      bool gnome() {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        return !platf::kwin_available() && platf::mutter_available();
+  #else
+        return false;
+  #endif
+      }
+
+      std::optional<std::string> prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
+        }
+  #endif
+        return platf::kwin_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
+      }
+
+      std::optional<display_plan::plan_t> make_plan(const std::string &outputs, int virtual_count) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_make_plan(outputs, virtual_count);
+        }
+  #endif
+        return platf::kwin_available() ? platf::kwin_make_plan(outputs, virtual_count) : std::nullopt;
+      }
+
+      std::optional<platf::desktop_manifest_t> plan_manifest(const std::string &outputs, int count, bool virtual_only) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_plan_manifest(outputs, count, virtual_only);
+        }
+  #endif
+        return platf::kwin_plan_manifest(outputs, count, virtual_only);
+      }
+
+      std::optional<platf::desktop_manifest_t> session_manifest() {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_session_manifest();
+        }
+  #endif
+        return platf::kwin_session_manifest();
+      }
+    }  // namespace linux_desktop
+#endif
+
     /**
      * @brief The session's screen plan for a launch or resume request, made before any virtual
      *        display exists. Nothing when Meteor's multi-monitor capture is off.
      * @param error Set when the screens asked for can't be streamed together.
      */
     std::optional<display_plan::plan_t> plan_for_request(const std::string &outputs, int virtual_count, std::string &error) {
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma and GNOME: several screens are packed from their own streams (pipewire_multi.cpp).
+      if (platf::kwin_available() || linux_desktop::gnome()) {
+        auto plan = linux_desktop::make_plan(outputs, virtual_count);
+        if (!plan) {
+          error = "The selected screens can't be streamed together";
+        }
+        return plan;
+      }
+#endif
 #ifdef _WIN32
       if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
         auto plan = platf::dxgi::make_plan(outputs, virtual_count);
@@ -4336,8 +4398,11 @@ namespace nvhttp {
       }
 #endif
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
-      if (const auto error = platf::kwin_workspace_selection_error(outputs)) {
-        return error;
+      // GNOME packs every selection from per-monitor streams; its plan checks the frame fits.
+      if (!linux_desktop::gnome()) {
+        if (const auto error = platf::kwin_workspace_selection_error(outputs)) {
+          return error;
+        }
       }
 #endif
       return std::nullopt;
@@ -4973,7 +5038,7 @@ namespace nvhttp {
       // monitors. Only the first viewer of a session decides what it captures.
       if (!has_stream_session_activity()) {
         std::string virtual_error;
-        if (auto prepared = platf::kwin_prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
           requested_outputs = std::move(*prepared);
         } else {
           BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
@@ -5621,7 +5686,7 @@ namespace nvhttp {
       // monitors. Only the first viewer of a session decides what it captures.
       if (!has_stream_session_activity()) {
         std::string virtual_error;
-        if (auto prepared = platf::kwin_prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
           requested_outputs = std::move(*prepared);
         } else {
           BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
@@ -6477,12 +6542,13 @@ namespace nvhttp {
                                  args.find("virtual_only") != args.end();
       if (asks_for_plan) {
         const bool virtual_only = get_arg(args, "virtual_only", "") == "1";
-        const int count = requested_virtual_count(args);
-        manifest = count > 0 || virtual_only ? platf::kwin_plan_manifest(get_arg(args, "outputs", ""), count, virtual_only) :
-                                               platf::kwin_query_desktop_manifest(get_arg(args, "outputs", ""));
+        manifest = linux_desktop::plan_manifest(get_arg(args, "outputs", ""), requested_virtual_count(args), virtual_only);
         output["planned"] = true;
       } else {
-        manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+        manifest = linux_desktop::session_manifest();
+        if (!manifest) {
+          manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+        }
       }
     }
   #endif
@@ -6496,6 +6562,9 @@ namespace nvhttp {
       output["desktop_bounds"] = {manifest->desktop_x, manifest->desktop_y, manifest->desktop_width, manifest->desktop_height};
       output["contiguous"] = manifest->contiguous;
       output["tiled"] = manifest->tiled;
+      if (manifest->any_selection) {
+        output["any_selection"] = true;
+      }
       for (const auto &m : manifest->monitors) {
         output["monitors"].push_back({
           {"id", m.id},

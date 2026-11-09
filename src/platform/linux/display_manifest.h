@@ -78,6 +78,8 @@ namespace platf {
     std::vector<monitor_manifest_entry_t> monitors;
     bool contiguous = true;
     bool tiled = false;
+    /// Each screen is captured on its own and packed, so any set of monitors can be chosen.
+    bool any_selection = false;
   };
 
   /**
