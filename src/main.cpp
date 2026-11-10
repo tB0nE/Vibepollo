@@ -43,6 +43,9 @@
   #include "lutris_auto_sync.h"
 #endif
 #include "webrtc_stream.h"
+#ifdef __APPLE__
+  #include "platform/macos/display_layout.h"
+#endif
 #ifdef _WIN32
   #include <shobjidl.h>
 
@@ -320,6 +323,22 @@ int main(int argc, char *argv[]) {
     std::printf("%s version: %s commit: %s\n", PROJECT_NAME, PROJECT_VERSION, PROJECT_VERSION_COMMIT);
     return 0;
   }
+#ifdef __APPLE__
+  if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
+    // --meteor-display-layout [outputs|@virtual] [virtual displays]: the plan a launch would get.
+    const auto plan = platf::macos::make_plan(argc > 2 ? argv[2] : "", argc > 3 ? std::atoi(argv[3]) : 0);
+    if (!plan) { std::fprintf(stderr, "Unsupported monitor selection\n"); return 1; }
+    std::printf("frame=%dx%d\n", plan->frame_width, plan->frame_height);
+    for (const auto &m : plan->screens)
+      std::printf("screen=%s label=%s enabled=%d primary=%d virtual=%d frame=%d,%d,%d,%d\n",
+        m.id.c_str(), m.label.c_str(), m.enabled, m.is_primary, m.is_virtual, m.frame_x, m.frame_y, m.width, m.height);
+    return 0;
+  }
+  if (argc >= 4 && argv[1] == "--meteor-capture-probe"sv) {
+    // --meteor-capture-probe <virtual displays> <out.nv12> [outputs|@virtual]
+    return platf::macos::capture_probe(argc > 4 ? argv[4] : "", std::atoi(argv[2]), argv[3]);
+  }
+#endif
 #ifdef _WIN32
   if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
     // --meteor-display-layout [outputs|@virtual] [virtual displays]: the plan a launch would get.

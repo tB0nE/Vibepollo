@@ -37,6 +37,15 @@ namespace platf {
       CVPixelBufferLockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
     }
 
+    /// Takes over one reference to a buffer this process made (a multi-monitor composite).
+    struct adopt_t {};
+
+    av_pixel_buf_t(CVPixelBufferRef made, adopt_t):
+        buf(made),
+        owned(true) {
+      CVPixelBufferLockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
+    }
+
     [[nodiscard]] uint8_t *data() const {
       return static_cast<uint8_t *>(CVPixelBufferGetBaseAddress(buf));
     }
@@ -45,8 +54,14 @@ namespace platf {
     ~av_pixel_buf_t() {
       if (buf != nullptr) {
         CVPixelBufferUnlockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
+        if (owned) {
+          CVPixelBufferRelease(buf);
+        }
       }
     }
+
+  private:
+    bool owned = false;
   };
 
   struct av_img_t: img_t {

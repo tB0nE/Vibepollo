@@ -37,14 +37,22 @@ else()
             PATTERN ".DS_Store" EXCLUDE
             PATTERN "._*" EXCLUDE)
 
-    # Pull in non-system dylibs for a self-contained .app
+    # Pull in non-system dylibs for a self-contained .app. Some Homebrew dylibs
+    # name their siblings through @rpath (webp -> @rpath/libsharpyuv), which
+    # fixup_bundle only resolves with a directory to search.
+    set(_bundle_search_dirs "")
+    foreach(_dir IN ITEMS /opt/homebrew/lib /usr/local/lib)
+        if(IS_DIRECTORY "${_dir}")
+            list(APPEND _bundle_search_dirs "${_dir}")
+        endif()
+    endforeach()
     install(CODE "
         set(_app \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_PROJECT_NAME}.app\")
 
         message(STATUS \"Running fixup_bundle for: \${_app}\")
         include(BundleUtilities)
         set(BU_CHMOD_BUNDLE_ITEMS TRUE)
-        fixup_bundle(\"\${_app}\" \"\" \"\")
+        fixup_bundle(\"\${_app}\" \"\" \"${_bundle_search_dirs}\")
 
         # Remove Finder/resource-fork metadata that breaks codesign.
         execute_process(COMMAND /usr/bin/xattr -rc \"\${_app}\")
@@ -60,7 +68,7 @@ else()
         endif()
 
         # SHOULD_SIGN is set only when publish_release is true or when manually building
-        if(\$ENV{SHOULD_SIGN} STREQUAL \"true\")
+        if(\"\$ENV{SHOULD_SIGN}\" STREQUAL \"true\")
           # Sign anything inside Contents/Frameworks
           set(_fw_dir \"\${_app}/Contents/Frameworks\")
           if(EXISTS \"\${_fw_dir}\")
@@ -97,6 +105,15 @@ else()
           )
           if(NOT rc4 EQUAL 0)
               message(FATAL_ERROR \"codesign --verify failed\")
+          endif()
+        else()
+          # Apple Silicon won't start an unsigned arm64 binary, and fixup_bundle
+          # rewrote every library's load paths. Sign ad hoc, as the linker did.
+          execute_process(COMMAND /usr/bin/codesign --force --deep --sign - \"\${_app}\"
+              RESULT_VARIABLE rc5
+          )
+          if(NOT rc5 EQUAL 0)
+              message(FATAL_ERROR \"ad hoc codesign failed\")
           endif()
         endif()
     " COMPONENT Runtime)

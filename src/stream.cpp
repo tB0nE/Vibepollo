@@ -65,6 +65,9 @@ extern "C" {
 #include "utility.h"
 #include "uuid.h"
 #include "webrtc_stream.h"
+#ifdef __APPLE__
+  #include "platform/macos/display_layout.h"
+#endif
 #ifdef _WIN32
   #include "platform/windows/frame_limiter.h"
   #include "platform/windows/display.h"
@@ -3345,6 +3348,16 @@ namespace stream {
       if (display_restore_requested) {
         (void) display_helper_integration::revert();
       }
+  #ifdef __APPLE__
+      // The session's virtual displays stay a while, so a quick reconnect finds them.
+      if (config::video.dd.config_revert_delay.count() > 0) {
+        platf::macos::schedule_virtual_outputs_release(
+          std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+        );
+      } else {
+        platf::macos::release_virtual_outputs();
+      }
+  #endif
 #endif
 
       if (shared_platform_started) {
