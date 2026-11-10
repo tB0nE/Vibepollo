@@ -5033,6 +5033,10 @@ namespace nvhttp {
       auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
                                  std::string {capture_outputs::virtual_only_token} :
                                  get_arg(args, "outputs", "");
+      // The plan follows what the client asked for: preparing virtual monitors below replaces
+      // requested_outputs with their connector names, which would read as a physical selection
+      // (and bring the primary monitor back for virtual_only).
+      const auto plan_request = requested_outputs;
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
       // monitors. Only the first viewer of a session decides what it captures.
@@ -5067,7 +5071,7 @@ namespace nvhttp {
         }
       }
       std::string plan_error;
-      const auto session_plan = plan_for_request(requested_outputs, requested_virtual_count(args), plan_error);
+      const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
       if (!plan_error.empty()) {
         BOOST_LOG(warning) << "Rejecting launch: "sv << plan_error;
         tree.put("root.<xmlattr>.status_code", 400);
@@ -5681,6 +5685,10 @@ namespace nvhttp {
       auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
                                  std::string {capture_outputs::virtual_only_token} :
                                  get_arg(args, "outputs", "");
+      // The plan follows what the client asked for: preparing virtual monitors below replaces
+      // requested_outputs with their connector names, which would read as a physical selection
+      // (and bring the primary monitor back for virtual_only).
+      const auto plan_request = requested_outputs;
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
       // monitors. Only the first viewer of a session decides what it captures.
@@ -5705,7 +5713,7 @@ namespace nvhttp {
       return;
     }
     std::string plan_error;
-    const auto session_plan = plan_for_request(requested_outputs, requested_virtual_count(args), plan_error);
+    const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
     if (!plan_error.empty()) {
       BOOST_LOG(warning) << "Rejecting resume: "sv << plan_error;
       tree.put("root.<xmlattr>.status_code", 400);
