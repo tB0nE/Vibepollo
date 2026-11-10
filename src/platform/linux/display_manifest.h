@@ -293,7 +293,10 @@ namespace platf {
     }
     const float local_x = std::clamp(x - nearest->frame_x, 0.0f, (float) (nearest->width - 1));
     const float local_y = std::clamp(y - nearest->frame_y, 0.0f, (float) (nearest->height - 1));
-    return {nearest->desktop_x + local_x, nearest->desktop_y + local_y};
+    // A tile scaled to fit the encoder: frame pixels to desktop pixels.
+    const float sx = nearest->desktop_w > 0 && nearest->width > 0 ? (float) nearest->desktop_w / nearest->width : 1.0f;
+    const float sy = nearest->desktop_h > 0 && nearest->height > 0 ? (float) nearest->desktop_h / nearest->height : 1.0f;
+    return {nearest->desktop_x + local_x * sx, nearest->desktop_y + local_y * sy};
   }
 
   /**
