@@ -83,7 +83,10 @@ namespace platf {
   }
 
   // Only automatic/KWin selection may use this path; explicit portal/wlr/KMS stay explicit.
-  inline bool use_kwin_workspace(bool wayland, const std::string &backend, const std::string &outputs) {
-    return wayland && (backend.empty() || backend == "kwin") && !split_csv(outputs).empty();
+  // On GNOME the automatic backend is Mutter, whose own display packs the selected
+  // monitors, so automatic selection must not route it to KWin.
+  inline bool use_kwin_workspace(bool wayland, const std::string &backend, const std::string &outputs, bool mutter_selected) {
+    const bool kwin_backend = backend == "kwin" || (backend.empty() && !mutter_selected);
+    return wayland && kwin_backend && !split_csv(outputs).empty();
   }
 }  // namespace platf

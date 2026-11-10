@@ -78,13 +78,15 @@ TEST(WaylandWorkspace, NegotiationMustMatchManifestExactly) {
 }
 
 TEST(WaylandWorkspace, ExplicitBackendSelectionIsPreserved) {
-  EXPECT_TRUE(platf::use_kwin_workspace(true, "", "left, main"));
-  EXPECT_TRUE(platf::use_kwin_workspace(true, "kwin", "main"));
-  EXPECT_FALSE(platf::use_kwin_workspace(false, "", "main"));
-  EXPECT_FALSE(platf::use_kwin_workspace(true, "portal", "main"));
-  EXPECT_FALSE(platf::use_kwin_workspace(true, "wlr", "main"));
-  EXPECT_FALSE(platf::use_kwin_workspace(true, "kms", "main"));
-  EXPECT_FALSE(platf::use_kwin_workspace(true, "", " , "));
+  EXPECT_TRUE(platf::use_kwin_workspace(true, "", "left, main", false));
+  EXPECT_TRUE(platf::use_kwin_workspace(true, "kwin", "main", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(false, "", "main", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(true, "portal", "main", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(true, "wlr", "main", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(true, "kms", "main", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(true, "", " , ", false));
+  EXPECT_FALSE(platf::use_kwin_workspace(true, "", "left, main", true));
+  EXPECT_TRUE(platf::use_kwin_workspace(true, "kwin", "main", true));
 }
 
 TEST(WaylandWorkspace, MissingOrDuplicateGeometryCannotProduceManifest) {

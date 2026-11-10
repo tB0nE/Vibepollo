@@ -1459,8 +1459,13 @@ namespace platf {
   ) {
     (void) required_adapter;
 #ifdef SUNSHINE_BUILD_KWIN
+  #ifdef SUNSHINE_BUILD_MUTTER
+    const bool mutter_selected = sources[source::MUTTER];
+  #else
+    const bool mutter_selected = false;
+  #endif
     if (use_kwin_workspace(window_system == window_system_e::WAYLAND,
-          config::video.capture, capture_outputs::get())) {
+          config::video.capture, capture_outputs::get(), mutter_selected)) {
       // KWin supplies all selected monitors in one native region stream. Never
       // let the generic single-output portal fallback consume this request.
       BOOST_LOG(info) << "Screencasting selected monitors with KWin workspace capture"sv;
