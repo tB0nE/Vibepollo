@@ -331,6 +331,16 @@ namespace mutter {
       error = "Can't read the monitor layout from Mutter";
       return false;
     }
+    // Reconfiguring rebuilds every view; skip it when the monitors already stand there (Mutter
+    // adds a virtual monitor at the right edge, which is where a 1+N plan puts it).
+    const bool unchanged = std::all_of(positions.begin(), positions.end(), [&](const auto &wanted) {
+      return std::any_of(state->monitors.begin(), state->monitors.end(), [&](const auto &m) {
+        return m.connector == wanted.first && m.x == wanted.second.first && m.y == wanted.second.second;
+      });
+    });
+    if (unchanged) {
+      return true;
+    }
     GVariantBuilder logical;
     g_variant_builder_init(&logical, G_VARIANT_TYPE("a(iiduba(ssa{sv}))"));
     for (const auto &m : state->monitors) {
@@ -472,12 +482,21 @@ namespace mutter {
     bool ensure(int count, int width, int height, int refresh_hz, std::string &error) {
       std::lock_guard lock {mutex};
       count = std::clamp(count, 0, platf::kwin_virtual::max_count);
+      std::vector<std::string> removed;
       if (!monitors.empty() && (width != size_w || height != size_h || refresh_hz != size_hz)) {
+        for (const auto &m : monitors) {
+          removed.push_back(m->connector);
+        }
         release_locked();
       }
       while (static_cast<int>(monitors.size()) > count) {
+        removed.push_back(monitors.back()->connector);
         monitors.pop_back();
       }
+      // Stopping a session removes its monitor some time after Stop returns. Reading or applying
+      // the layout before then sees a monitor that is going away, and ApplyMonitorsConfig in that
+      // window crashed gnome-shell 51 (meta_crtc_mode_get_info on the removed CRTC's mode).
+      wait_until_removed(removed);
       size_w = width;
       size_h = height;
       size_hz = refresh_hz;
@@ -553,6 +572,26 @@ namespace mutter {
       session_t session;
       std::string connector;
     };
+
+    static void wait_until_removed(const std::vector<std::string> &connectors) {
+      if (connectors.empty()) {
+        return;
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      while (std::chrono::steady_clock::now() < deadline) {
+        const auto state = current_state();
+        const bool present = state && std::any_of(state->monitors.begin(), state->monitors.end(), [&](const auto &m) {
+          return std::find(connectors.begin(), connectors.end(), m.connector) != connectors.end();
+        });
+        if (state && !present) {
+          // Let Mutter finish the rebuild that follows the removal before the next request.
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      BOOST_LOG(warning) << "[mutter] Removed virtual monitors were still listed after 3 s"sv;
+    }
 
     /// Connects once with the wanted size and maximum rate, which become the monitor's mode.
     static bool negotiate(uint32_t node, int width, int height, int refresh_hz) {
