@@ -50,12 +50,16 @@ TEST(NvencApiTest, NativeLinuxBackendIsDefaultAndExplicitSelectionFailsClosed) {
 
   EXPECT_TRUE(automatic.include_native);
   EXPECT_FALSE(automatic.fail_closed);
+  EXPECT_TRUE(automatic.require_capture_probe);
   EXPECT_TRUE(native.include_native);
   EXPECT_TRUE(native.fail_closed);
+  EXPECT_FALSE(native.require_capture_probe);
   EXPECT_TRUE(native_alias.include_native);
   EXPECT_TRUE(native_alias.fail_closed);
+  EXPECT_FALSE(native_alias.require_capture_probe);
   EXPECT_FALSE(legacy.include_native);
   EXPECT_FALSE(legacy.fail_closed);
+  EXPECT_TRUE(legacy.require_capture_probe);
   EXPECT_EQ(nvenc::canonical_encoder_name("nvenc_experimental"), "nvenc");
 }
 

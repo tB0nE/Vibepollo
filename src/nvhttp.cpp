@@ -65,6 +65,9 @@
 #include "update.h"
 #include "single_flight.h"
 #include "state_storage_policy.h"
+#ifdef __APPLE__
+  #include "platform/macos/display_layout.h"
+#endif
 #ifdef _WIN32
   #include "platform/windows/display.h"
   #include "platform/windows/display_helper_request_policy.h"
@@ -73,14 +76,26 @@
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_cleanup.h"
 #elif defined(__linux__)
+  #include "platform/linux/display_manifest.h"
   #include "platform/linux/private_display.h"
   #include "platform/linux/routed_link.h"
   #include "platform/linux/mangohud_policy.h"
   #include "src/platform/linux/display_backend.h"
   #include "platform/linux/display_power.h"
   #include "platform/linux/private_display_resume_policy.h"
+  #ifdef SUNSHINE_BUILD_KWIN
+    #include "platform/linux/kwin_workspace.h"
+    #ifdef SUNSHINE_BUILD_MUTTER
+      #include "platform/linux/mutter_workspace.h"
+    #endif
+  #endif
+  #ifdef SUNSHINE_BUILD_X11
+    #include "platform/linux/x11grab.h"
+  #endif
 #endif
 
+#include "capture_outputs.h"
+#include "display_plan.h"
 #include "process.h"
 #include "rtsp.h"
 #include "rtsp_pending_policy.h"
@@ -1499,6 +1514,27 @@ namespace nvhttp {
               launch_session->pre_virtual_display_refresh_rates = std::move(rates);
             }
           }
+          // Meteor composes several monitors into one stream frame, so the mode a client
+          // asks for is the whole frame, not one screen. Creating each virtual display at
+          // that size made every connect grow the next frame (2560x1440 -> 5120x2880 ->
+          // 7680x4320). A virtual display is one screen: match the primary physical monitor.
+          if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+            if (auto physical_devices = display_helper_integration::enumerate_devices()) {
+              for (const auto &device : *physical_devices) {
+                if (device.m_device_id.empty() || !device.m_info || !device.m_info->m_primary ||
+                    VDISPLAY::is_virtual_display_output(device.m_device_id)) {
+                  continue;
+                }
+                const auto &resolution = device.m_info->m_resolution;
+                if (resolution.m_width > 0 && resolution.m_height > 0) {
+                  vd_width = resolution.m_width;
+                  vd_height = resolution.m_height;
+                  BOOST_LOG(info) << "Virtual display sized to the primary monitor: " << vd_width << 'x' << vd_height;
+                }
+                break;
+              }
+            }
+          }
           VDISPLAY::setWatchdogFeedingEnabled(true);
           const char *hdr_profile = launch_session->hdr_profile ? launch_session->hdr_profile->c_str() : nullptr;
           auto display_info = VDISPLAY::createVirtualDisplay(
@@ -1694,6 +1730,50 @@ namespace nvhttp {
             };
 
             VDISPLAY::schedule_virtual_display_recovery_monitor(recovery_params);
+
+            // Additional displays the client asked for. Each gets its own identity so the
+            // driver treats it as a separate monitor, and preserve_peer_displays keeps the
+            // creation of one from tearing down the others.
+            launch_session->extra_virtual_display_device_ids.clear();
+            for (int extra = 1; extra <= launch_session->extra_virtual_displays; ++extra) {
+              const std::string extra_uid = display_uuid_source + "#vd" + std::to_string(extra + 1);
+              const auto extra_uuid = VDISPLAY::virtualDisplayUuidFromStableId(extra_uid);
+              GUID extra_guid {};
+              std::memcpy(&extra_guid, extra_uuid.b8, sizeof(extra_guid));
+              const std::string extra_label = client_label + " " + std::to_string(extra + 1);
+              auto extra_info = VDISPLAY::createVirtualDisplay(
+                extra_uid.c_str(),
+                extra_label.c_str(),
+                hdr_profile,
+                vd_width,
+                vd_height,
+                vd_fps,
+                extra_guid,
+                base_vd_fps_millihz,
+                framegen_refresh_active,
+                refresh_multiplier,
+                virtual_display_hdr_requested,
+                false,
+                !shared_mode,
+                true
+              );
+              if (!extra_info) {
+                BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " could not be created; continuing without it.";
+                continue;
+              }
+              std::string extra_device_id;
+              if (extra_info->device_id && !extra_info->device_id->empty()) {
+                extra_device_id = *extra_info->device_id;
+              } else if (auto resolved_extra = VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(extra_uid, "", extra_label, false)) {
+                extra_device_id = *resolved_extra;
+              }
+              if (extra_device_id.empty()) {
+                BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " has no resolved device id; it will not join the topology.";
+                continue;
+              }
+              BOOST_LOG(info) << "Extra virtual display " << (extra + 1) << " created (device_id=" << extra_device_id << ").";
+              launch_session->extra_virtual_display_device_ids.push_back(std::move(extra_device_id));
+            }
           } else {
             disable_virtual_display_request();
             launch_session->virtual_display = false;
@@ -3281,17 +3361,11 @@ namespace nvhttp {
         }
         named_cert_p->cert = std::move(client.cert);
         named_cert_p->uuid = uuid_util::uuid_t::generate().string();
-        // If the device is the first one paired with the server, assign full permission.
-        bool first_client = false;
-        {
-          std::lock_guard<std::mutex> lock(client_mutex);
-          first_client = client_root.named_devices.empty();
-        }
-        if (first_client) {
-          named_cert_p->perm = PERM::_all;
-        } else {
-          named_cert_p->perm = PERM::_default;
-        }
+        // Nightfall: every paired device gets full permission, not only the
+        // first. Pairing already needs the PIN entered in the admin-only web
+        // UI; upstream's view-only default left later headsets unable to
+        // launch apps or send input, with no way to ask for more.
+        named_cert_p->perm = PERM::_all;
 
         named_cert_p->enable_legacy_ordering = true;
         named_cert_p->allow_client_commands = true;
@@ -4217,6 +4291,135 @@ namespace nvhttp {
       }
     }
 
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+    /// KDE Plasma (KWin) or GNOME (Mutter): the compositor whose screens a session streams.
+    namespace linux_desktop {
+      bool gnome() {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        return !platf::kwin_available() && platf::mutter_available();
+  #else
+        return false;
+  #endif
+      }
+
+      std::optional<std::string> prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
+        }
+  #endif
+        return platf::kwin_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
+      }
+
+      std::optional<display_plan::plan_t> make_plan(const std::string &outputs, int virtual_count) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_make_plan(outputs, virtual_count);
+        }
+  #endif
+        return platf::kwin_available() ? platf::kwin_make_plan(outputs, virtual_count) : std::nullopt;
+      }
+
+      std::optional<platf::desktop_manifest_t> plan_manifest(const std::string &outputs, int count, bool virtual_only) {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_plan_manifest(outputs, count, virtual_only);
+        }
+  #endif
+        return platf::kwin_plan_manifest(outputs, count, virtual_only);
+      }
+
+      std::optional<platf::desktop_manifest_t> session_manifest() {
+  #ifdef SUNSHINE_BUILD_MUTTER
+        if (gnome()) {
+          return platf::mutter_session_manifest();
+        }
+  #endif
+        return platf::kwin_session_manifest();
+      }
+    }  // namespace linux_desktop
+#endif
+
+    /**
+     * @brief The session's screen plan for a launch or resume request, made before any virtual
+     *        display exists. Nothing when Meteor's multi-monitor capture is off.
+     * @param error Set when the screens asked for can't be streamed together.
+     */
+    std::optional<display_plan::plan_t> plan_for_request(const std::string &outputs, int virtual_count, std::string &error) {
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma and GNOME: several screens are packed from their own streams (pipewire_multi.cpp).
+      if (platf::kwin_available() || linux_desktop::gnome()) {
+        auto plan = linux_desktop::make_plan(outputs, virtual_count);
+        if (!plan) {
+          error = "The selected screens can't be streamed together";
+        }
+        return plan;
+      }
+#endif
+#ifdef _WIN32
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        auto plan = platf::dxgi::make_plan(outputs, virtual_count);
+        if (!plan) {
+          error = "The selected screens can't be streamed together";
+        }
+        return plan;
+      }
+#endif
+#ifdef __APPLE__
+      if (platf::macos::multimonitor_enabled()) {
+        auto plan = platf::macos::make_plan(outputs, virtual_count);
+        if (!plan) {
+          error = "The selected screens can't be streamed together";
+        }
+        return plan;
+      }
+#endif
+      return std::nullopt;
+    }
+
+    int requested_virtual_count(const args_t &args) {
+      const auto value = get_arg(args, "virtual_displays", "");
+      if (value.empty()) {
+        return 0;
+      }
+      try {
+        return std::clamp(std::stoi(value), 0, 4);
+      } catch (...) {
+        return 0;
+      }
+    }
+
+    /**
+     * @brief Why a launch or resume can't capture the monitors in its outputs= list, if so.
+     *
+     * Several monitors are cropped from the desktop as one rectangle, so they must not
+     * leave out a monitor that lies between them.
+     */
+    std::optional<std::string> capture_outputs_error(const std::string &outputs) {
+#if defined(_WIN32) || defined(__APPLE__)
+      // "@virtual" asks for the session's virtual displays alone, which are created after this check.
+      if (outputs == capture_outputs::virtual_only_token) {
+        return std::nullopt;
+      }
+#endif
+#if defined(__linux__) && defined(SUNSHINE_BUILD_X11)
+      if (platf::split_csv(outputs).size() > 1) {
+        if (const auto manifest = platf::x11_query_desktop_manifest(outputs); manifest && !manifest->contiguous) {
+          return "outputs= [" + outputs + "] leaves out a monitor between the ones it names; include it, or pick monitors that sit side by side";
+        }
+      }
+#endif
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // GNOME packs every selection from per-monitor streams; its plan checks the frame fits.
+      if (!linux_desktop::gnome()) {
+        if (const auto error = platf::kwin_workspace_selection_error(outputs)) {
+          return error;
+        }
+      }
+#endif
+      return std::nullopt;
+    }
+
     void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, bool normal_app_transition = true, bool launched_from_applist = false);
     void cancel(resp_https_t response, req_https_t request);
 
@@ -4838,6 +5041,71 @@ namespace nvhttp {
 #endif
       const bool allow_display_changes = true;
       auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+      // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
+      auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                 std::string {capture_outputs::virtual_only_token} :
+                                 get_arg(args, "outputs", "");
+      // The plan follows what the client asked for: preparing virtual monitors below replaces
+      // requested_outputs with their connector names, which would read as a physical selection
+      // (and bring the primary monitor back for virtual_only).
+      const auto plan_request = requested_outputs;
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
+      // monitors. Only the first viewer of a session decides what it captures.
+      if (!has_stream_session_activity()) {
+        std::string virtual_error;
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          requested_outputs = std::move(*prepared);
+        } else {
+          BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
+#endif
+#ifdef __APPLE__
+      // Meteor's multi-monitor capture: make the session's virtual displays before planning it.
+      // Only the first viewer of a session decides what it captures.
+      if (platf::macos::multimonitor_enabled() && !has_stream_session_activity()) {
+        platf::macos::cancel_virtual_outputs_release();
+        std::string virtual_error;
+        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
+#endif
+      if (const auto error = capture_outputs_error(requested_outputs)) {
+        BOOST_LOG(warning) << "Rejecting launch: "sv << *error;
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", *error);
+        tree.put("root.gamesession", 0);
+        return;
+      }
+      // `virtual_displays=N` asks for N virtual displays this session; the first is the
+      // usual per-client display, the rest are created beside it.
+      if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
+        try {
+          launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+          BOOST_LOG(info) << "Client requested "sv << (launch_session->extra_virtual_displays + 1) << " virtual display(s)"sv;
+        } catch (...) {
+          BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
+        }
+      }
+      std::string plan_error;
+      const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
+      if (!plan_error.empty()) {
+        BOOST_LOG(warning) << "Rejecting launch: "sv << plan_error;
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", plan_error);
+        tree.put("root.gamesession", 0);
+        return;
+      }
       std::optional<std::string> pending_output_override;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override) {
@@ -4847,6 +5115,11 @@ namespace nvhttp {
       no_active_sessions = !has_stream_session_activity();
       if (no_active_sessions) {
         config::set_runtime_output_name_override(std::nullopt);
+        // A viewer joining a running stream can't change what it captures.
+        capture_outputs::set(requested_outputs);
+        if (session_plan) {
+          display_plan::set(*session_plan);
+        }
 #if defined(_WIN32) || defined(__linux__)
         stream::cancel_paused_display_cleanup();
 #endif
@@ -5209,6 +5482,29 @@ namespace nvhttp {
       runtime_overrides_guard.disable();
     }
 
+#ifdef _WIN32
+  // A resumed session keeps the virtual displays its launch created. Find the extra ones again so
+  // the display request lists them; without that the helper rebuilds the layout from the primary
+  // virtual display alone and switches the rest off.
+  static void find_extra_virtual_displays(rtsp_stream::launch_session_t &session) {
+    session.extra_virtual_display_device_ids.clear();
+    if (session.extra_virtual_displays <= 0) {
+      return;
+    }
+    const auto mode = session.virtual_display_mode_override.value_or(config::video.virtual_display_mode);
+    const bool shared_mode = mode == config::video_t::virtual_display_mode_e::shared;
+    const std::string base_uid = (!shared_mode && !session.client_uuid.empty()) ? session.client_uuid : session.unique_id;
+    for (int extra = 1; extra <= session.extra_virtual_displays; ++extra) {
+      const std::string extra_uid = base_uid + "#vd" + std::to_string(extra + 1);
+      if (auto found = VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(extra_uid, "", session.client_name, false)) {
+        session.extra_virtual_display_device_ids.push_back(*found);
+      } else {
+        BOOST_LOG(warning) << "Extra virtual display " << (extra + 1) << " was not found on resume.";
+      }
+    }
+  }
+#endif
+
   void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, const bool normal_app_transition, const bool launched_from_applist) {
     print_req<SunshineHTTPS>(request);
 
@@ -5405,6 +5701,74 @@ namespace nvhttp {
     }
 
     auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+    if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
+      try {
+        launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+      } catch (...) {
+        BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
+      }
+    }
+    // virtual_only=1: capture the session's virtual displays and none of the physical monitors.
+      auto requested_outputs = get_arg(args, "virtual_only", "") == "1" ?
+                                 std::string {capture_outputs::virtual_only_token} :
+                                 get_arg(args, "outputs", "");
+      // The plan follows what the client asked for: preparing virtual monitors below replaces
+      // requested_outputs with their connector names, which would read as a physical selection
+      // (and bring the primary monitor back for virtual_only).
+      const auto plan_request = requested_outputs;
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
+      // monitors. Only the first viewer of a session decides what it captures.
+      if (!has_stream_session_activity()) {
+        std::string virtual_error;
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          requested_outputs = std::move(*prepared);
+        } else {
+          BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.resume", 0);
+          return;
+        }
+      }
+#endif
+#ifdef __APPLE__
+      // Meteor's multi-monitor capture: make the session's virtual displays before planning it.
+      // Only the first viewer of a session decides what it captures.
+      if (platf::macos::multimonitor_enabled() && !has_stream_session_activity()) {
+        platf::macos::cancel_virtual_outputs_release();
+        std::string virtual_error;
+        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, virtual_error)) {
+          BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", virtual_error);
+          tree.put("root.resume", 0);
+          return;
+        }
+      }
+#endif
+    if (const auto error = capture_outputs_error(requested_outputs)) {
+      BOOST_LOG(warning) << "Rejecting resume: "sv << *error;
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", *error);
+      tree.put("root.resume", 0);
+      return;
+    }
+    std::string plan_error;
+    const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
+    if (!plan_error.empty()) {
+      BOOST_LOG(warning) << "Rejecting resume: "sv << plan_error;
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", plan_error);
+      tree.put("root.resume", 0);
+      return;
+    }
+    if (no_active_sessions) {
+      capture_outputs::set(requested_outputs);
+      if (session_plan) {
+        display_plan::set(*session_plan);
+      }
+    }
     if (!proc::proc.allow_client_commands || !verified_client->allow_client_commands) {
       launch_session->client_do_cmds.clear();
       launch_session->client_undo_cmds.clear();
@@ -5628,6 +5992,7 @@ namespace nvhttp {
           display_startup_cancelled,
           display_startup_deadline
         );
+        find_extra_virtual_displays(*launch_session);
         auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);
         if (!request) {
           BOOST_LOG(warning) << "Display helper: failed to build display configuration request; continuing with existing display.";
@@ -6137,6 +6502,200 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  /**
+   * @brief GET /polaris/v1/display/manifest: where each monitor is in the captured frame.
+   *
+   * Same shape as Nightfall's Polaris fork, so Nightfall can show each monitor as its own
+   * screen and send the ones it wants back as outputs=.
+   */
+  void getDisplayManifest(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+
+    auto verified_client = get_verified_cert(request);
+    if (!has_client_perm(verified_client, PERM::_allow_view)) {
+      log_permission_denied("DisplayManifest"sv, "View stream"sv, verified_client, true);
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    nlohmann::json output;
+    output["version"] = 1;
+    output["source"] = "host_manifest";
+    output["frame_size"] = {0, 0};
+    output["desktop_bounds"] = {0, 0, 0, 0};
+    output["monitors"] = nlohmann::json::array();
+#ifdef __APPLE__
+    // As on Windows: the session's plan, or with launch options in the query the plan a launch
+    // with them would get, so a client can request exactly that stream size.
+    if (platf::macos::multimonitor_enabled()) {
+      const auto args = request->parse_query_string();
+      const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
+                                 args.find("virtual_only") != args.end();
+      std::optional<display_plan::plan_t> plan;
+      if (asks_for_plan) {
+        const auto outputs = get_arg(args, "virtual_only", "") == "1" ? std::string {capture_outputs::virtual_only_token} :
+                                                                         get_arg(args, "outputs", "");
+        plan = platf::macos::make_plan(outputs, requested_virtual_count(args));
+      } else {
+        plan = platf::macos::session_plan();
+      }
+      if (!plan) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        response->close_connection_after_response = true;
+        return;
+      }
+      const auto placed = platf::macos::place(*plan, platf::macos::attached_outputs());
+      output["frame_size"] = {plan->frame_width, plan->frame_height};
+      // Clients send input as points in the frame, which the host maps back to each screen.
+      output["desktop_bounds"] = {0, 0, plan->frame_width, plan->frame_height};
+      output["contiguous"] = true;
+      output["tiled"] = true;
+      // Screens are packed by size, so any set of monitors can be streamed together.
+      output["any_selection"] = true;
+      output["planned"] = asks_for_plan;
+      for (std::size_t i = 0; i < plan->screens.size(); ++i) {
+        const auto &m = plan->screens[i];
+        nlohmann::json desktop = {0, 0, m.width, m.height};
+        if (i < placed.size() && placed[i]) {
+          desktop = {(int) placed[i]->x, (int) placed[i]->y, (int) placed[i]->points_w, (int) placed[i]->points_h};
+        }
+        output["monitors"].push_back({
+          {"id", m.id},
+          {"label", m.label},
+          {"enabled", m.enabled},
+          {"capturable", true},
+          {"is_primary", m.is_primary},
+          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.width, m.height} : nlohmann::json {0, 0, 0, 0}},
+          {"desktop_rect", desktop},
+          {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
+        });
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+      response->close_connection_after_response = true;
+      return;
+    }
+#endif
+#if defined(_WIN32) || defined(__linux__)
+    std::optional<platf::desktop_manifest_t> manifest;
+#ifdef _WIN32
+    // Meteor's multi-monitor capture streams the session's plan. With launch options in the
+    // query (outputs, virtual_displays, virtual_only) this is instead the plan a launch with
+    // those options would get, so a client can request exactly that stream size.
+    if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+      const auto args = request->parse_query_string();
+      const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
+                                 args.find("virtual_only") != args.end();
+      std::optional<display_plan::plan_t> plan;
+      if (asks_for_plan) {
+        const auto outputs = get_arg(args, "virtual_only", "") == "1" ? std::string {capture_outputs::virtual_only_token} :
+                                                                         get_arg(args, "outputs", "");
+        plan = platf::dxgi::make_plan(outputs, requested_virtual_count(args));
+      } else {
+        plan = platf::dxgi::session_plan();
+      }
+      if (!plan) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        response->close_connection_after_response = true;
+        return;
+      }
+      const auto attached = platf::dxgi::attached_outputs();
+      const auto placed = attached ? platf::dxgi::place(*plan, *attached) : std::vector<std::optional<platf::dxgi::attached_output_t>>(plan->screens.size());
+      output["frame_size"] = {plan->frame_width, plan->frame_height};
+      // Clients send input as points in the frame, which the host maps back to each screen.
+      output["desktop_bounds"] = {0, 0, plan->frame_width, plan->frame_height};
+      output["contiguous"] = true;
+      output["tiled"] = true;
+      // Screens are packed by size, so any set of monitors can be streamed together.
+      output["any_selection"] = true;
+      output["planned"] = asks_for_plan;
+      for (std::size_t i = 0; i < plan->screens.size(); ++i) {
+        const auto &m = plan->screens[i];
+        nlohmann::json desktop = {0, 0, m.width, m.height};
+        if (i < placed.size() && placed[i]) {
+          const auto &r = placed[i]->rect;
+          desktop = {r.left, r.top, r.right - r.left, r.bottom - r.top};
+        }
+        output["monitors"].push_back({
+          {"id", m.id},
+          {"label", m.label},
+          {"enabled", m.enabled},
+          {"capturable", true},
+          {"is_primary", m.is_primary},
+          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.width, m.height} : nlohmann::json {0, 0, 0, 0}},
+          {"desktop_rect", desktop},
+          {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
+        });
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+      response->close_connection_after_response = true;
+      return;
+    }
+#endif
+  #ifdef SUNSHINE_BUILD_KWIN
+    {
+      // With launch options in the query (outputs, virtual_displays, virtual_only) this is the
+      // layout a launch with them would get, so a client can request exactly that stream size.
+      const auto args = request->parse_query_string();
+      const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
+                                 args.find("virtual_only") != args.end();
+      if (asks_for_plan) {
+        const bool virtual_only = get_arg(args, "virtual_only", "") == "1";
+        manifest = linux_desktop::plan_manifest(get_arg(args, "outputs", ""), requested_virtual_count(args), virtual_only);
+        output["planned"] = true;
+      } else {
+        manifest = linux_desktop::session_manifest();
+        if (!manifest) {
+          manifest = platf::kwin_query_desktop_manifest(capture_outputs::get());
+        }
+      }
+    }
+  #endif
+  #ifdef SUNSHINE_BUILD_X11
+    if (!manifest) {
+      manifest = platf::x11_query_desktop_manifest(capture_outputs::get());
+    }
+  #endif
+    if (manifest) {
+      output["frame_size"] = {manifest->frame_width, manifest->frame_height};
+      output["desktop_bounds"] = {manifest->desktop_x, manifest->desktop_y, manifest->desktop_width, manifest->desktop_height};
+      output["contiguous"] = manifest->contiguous;
+      output["tiled"] = manifest->tiled;
+      if (manifest->any_selection) {
+        output["any_selection"] = true;
+      }
+      for (const auto &m : manifest->monitors) {
+        output["monitors"].push_back({
+          {"id", m.id},
+          {"label", m.label},
+          {"enabled", m.enabled},
+          {"capturable", m.capturable},
+          {"is_primary", m.is_primary},
+          {"frame_rect", {m.frame_x, m.frame_y, m.frame_w, m.frame_h}},
+          {"desktop_rect", {m.desktop_x, m.desktop_y, m.desktop_w, m.desktop_h}},
+          {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
+        });
+      }
+    } else
+#endif
+    {
+      // Return no layout when capture cannot honor it. In particular, XWayland's
+      // geometry must not stand in for an unsupported Wayland compositor.
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      response->close_connection_after_response = true;
+      return;
+    }
+
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+    response->close_connection_after_response = true;
+  }
+
   struct pyrowave_probe_state_t {
     resp_https_t response;
     std::size_t remaining;
@@ -6437,6 +6996,7 @@ namespace nvhttp {
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
     https_server.resource["^/bitrate$"]["GET"] = setBitrate;
     https_server.resource["^/api/abr/capabilities$"]["GET"] = getAbrCapabilities;
+    https_server.resource["^/polaris/v1/display/manifest$"]["GET"] = getDisplayManifest;
     https_server.resource["^/pyrowave-bandwidth-probe$"]["GET"] = getPyroWaveBandwidthProbe;
 
     https_server.config.reuse_address = true;

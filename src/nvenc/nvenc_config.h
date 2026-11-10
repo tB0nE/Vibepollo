@@ -23,6 +23,8 @@ namespace nvenc {
   struct encoder_selection_policy_t {
     bool include_native = true;
     bool fail_closed = false;
+    // Automatic selection must validate the desktop capture/conversion path.
+    bool require_capture_probe = true;
   };
 
   inline constexpr std::string_view canonical_encoder_name(
@@ -40,6 +42,7 @@ namespace nvenc {
     return {
       canonical_encoder != "nvenc_legacy",
       canonical_encoder == "nvenc",
+      canonical_encoder != "nvenc",
     };
   }
 

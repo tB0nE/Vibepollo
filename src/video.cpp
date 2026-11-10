@@ -5608,7 +5608,8 @@ namespace video {
       1.0f / scalar,
       scalar_tpcoords,
       display_env_logical_width,
-      display_env_logical_height
+      display_env_logical_height,
+      display->frame_tiles.empty() ? nullptr : std::make_shared<const std::vector<platf::frame_tile_t>>(display->frame_tiles)
     };
   }
 
@@ -6842,6 +6843,13 @@ namespace video {
       encoder.av1.capabilities.reset();
     };
 
+#if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
+    // An encoder-only probe can succeed on a different GPU than the desktop.
+    // Auto must prove the real capture/conversion path before choosing native
+    // NVENC; otherwise the later stream dies instead of trying another backend.
+    const bool native_encoder_only_probe = &encoder == &nvenc && !required_adapter &&
+      !nvenc::encoder_selection_policy(config::video.encoder).require_capture_probe;
+#endif
     const auto reset_probe_display = [&](const config_t &probe_config) {
 #ifdef _WIN32
       // Encoder capability validation is intentionally independent of WGC,
@@ -6849,6 +6857,11 @@ namespace video {
       // A short retry covers transient D3D device creation without waiting for
       // display topology to converge.
       disp.reset();
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR_PROBE")) {
+        reset_display(disp, encoder.platform_formats->dev_type,
+          probe_display_name, probe_config, required_adapter);
+        return;
+      }
       for (int attempt = 0; attempt < 2 && !disp; ++attempt) {
         disp = make_synthetic_probe_display(
           encoder.platform_formats->dev_type,
@@ -6861,11 +6874,10 @@ namespace video {
       }
 #else
   #if defined(SUNSHINE_BUILD_CUDA)
-      if (&encoder == &nvenc && !required_adapter) {
-        // Encoder capability probing does not need access to a scanout
-        // framebuffer. A blank GL/CUDA source isolates the native API probe
-        // from KMS privileges while the real stream still uses KMS capture.
-        BOOST_LOG(info) << "NvEnc: using a synthetic GL/CUDA source for encoder-only probing; KMS capture readiness is validated separately"sv;
+      if (native_encoder_only_probe) {
+        // Keep explicit native encoder capability checks independent of KMS
+        // permissions. They remain fail-closed and never silently switch APIs.
+        BOOST_LOG(info) << "NvEnc: explicit encoder-only probe uses a synthetic GL/CUDA source; real capture compatibility is not established"sv;
         disp = ::cuda::make_nvenc_probe_display(probe_config);
       } else
   #endif
@@ -6891,7 +6903,7 @@ namespace video {
     const bool cached_display_matches_required =
       !required_adapter || (cached_adapter && *cached_adapter == *required_adapter);
 #if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
-    const bool wants_native_nvenc_probe = &encoder == &nvenc && !required_adapter;
+    const bool wants_native_nvenc_probe = native_encoder_only_probe;
     const bool cached_probe_kind_matches =
       cached_display_is_native_nvenc_probe == wants_native_nvenc_probe;
 #else

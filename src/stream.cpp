@@ -57,6 +57,7 @@ extern "C" {
 #include "rtsp_pending_policy.h"
 #include "session_history.h"
 #include "stream.h"
+#include "startup_ping_wait.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -64,6 +65,9 @@ extern "C" {
 #include "utility.h"
 #include "uuid.h"
 #include "webrtc_stream.h"
+#ifdef __APPLE__
+  #include "platform/macos/display_layout.h"
+#endif
 #ifdef _WIN32
   #include "platform/windows/frame_limiter.h"
   #include "platform/windows/display.h"
@@ -80,6 +84,12 @@ extern "C" {
   #include "platform/linux/private_display.h"
   #include "platform/linux/wayland_hdr_compatibility.h"
   #include "src/platform/linux/display_backend.h"
+  #ifdef SUNSHINE_BUILD_KWIN
+    #include "platform/linux/kwin_workspace.h"
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+    #include "platform/linux/mutter_workspace.h"
+  #endif
 #endif
 
 #define IDX_START_A 0
@@ -300,6 +310,12 @@ namespace stream {
     g_paused_display_cleanup_generation.fetch_add(1, std::memory_order_acq_rel);
 #elif defined(__linux__)
     platf::linux_display::backend().cancel_scheduled_revert();
+  #ifdef SUNSHINE_BUILD_KWIN
+    platf::kwin_cancel_virtual_outputs_release();
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+    platf::mutter_cancel_virtual_outputs_release();
+  #endif
 #endif
   }
 
@@ -2978,33 +2994,31 @@ namespace stream {
       ref->message_queue_queue->raise(type, session_id, nullptr);
     });
 
-    auto start_time = std::chrono::steady_clock::now();
-    auto current_time = start_time;
-
-    while (current_time - start_time < config::stream.ping_timeout) {
-      auto delta_time = current_time - start_time;
-
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
-      if (!msg_opt) {
-        break;
-      }
-
-      TUPLE_2D_REF(recv_peer, msg, *msg_opt);
-      if (msg.find(expected_payload) != std::string::npos) {
-        // Match the new PING payload format
-        BOOST_LOG(debug) << "Received ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
-      } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
-        // Match the legacy fixed PING payload only if the new type is not supported
-        BOOST_LOG(debug) << "Received ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
-      } else {
-        BOOST_LOG(debug) << "Received non-ping from "sv << recv_peer.address() << ':' << recv_peer.port() << " ["sv << util::hex_vec(msg) << ']';
-        current_time = std::chrono::steady_clock::now();
-        continue;
-      }
-
-      // Update connection details.
-      peer = recv_peer;
+    const auto result = startup_ping::wait(timeout,
+      [&]() {
+        return startup_ping::session_stopped(session->state.load(std::memory_order_acquire)) ||
+               session->shutdown_event->peek() || !messages->running();
+      },
+      [&](auto interval) { return messages->pop(interval); },
+      [&](auto &message) {
+        TUPLE_2D_REF(recv_peer, msg, message);
+        if (msg.find(expected_payload) != std::string::npos) {
+          BOOST_LOG(debug) << "Received ping [v2] from "sv << recv_peer.address() << ':' << recv_peer.port();
+        } else if (!(session->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) && msg == "PING"sv) {
+          BOOST_LOG(debug) << "Received ping [v1] from "sv << recv_peer.address() << ':' << recv_peer.port();
+        } else {
+          return false;
+        }
+        peer = recv_peer;
+        return true;
+      });
+    if (result == startup_ping::result_e::received) {
       return 0;
+    }
+    if (result == startup_ping::result_e::cancelled) {
+      BOOST_LOG(debug) << "Initial "sv << (type == socket_e::video ? "video" : "audio")
+                       << " ping wait cancelled because the session stopped"sv;
+      return -1;
     }
 
     BOOST_LOG(error) << "Initial Ping Timeout"sv;
@@ -3296,6 +3310,12 @@ namespace stream {
           std::chrono::seconds(paused_timeout_secs),
           "paused-session timeout"
         );
+  #ifdef SUNSHINE_BUILD_KWIN
+        platf::kwin_schedule_virtual_outputs_release(std::chrono::seconds(paused_timeout_secs));
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+        platf::mutter_schedule_virtual_outputs_release(std::chrono::seconds(paused_timeout_secs));
+  #endif
       } else if (keep_virtual_display_due_to_pause) {
         BOOST_LOG(debug) << "Linux private display: keeping the private output active for resume.";
       } else {
@@ -3304,14 +3324,40 @@ namespace stream {
             config::video.dd.config_revert_delay,
             "stream-end delay"
           );
+  #ifdef SUNSHINE_BUILD_KWIN
+          platf::kwin_schedule_virtual_outputs_release(
+            std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+          );
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+          platf::mutter_schedule_virtual_outputs_release(
+            std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+          );
+  #endif
         } else {
           (void) platf::linux_display::backend().revert();
+  #ifdef SUNSHINE_BUILD_KWIN
+          platf::kwin_release_virtual_outputs();
+  #endif
+  #ifdef SUNSHINE_BUILD_MUTTER
+          platf::mutter_release_virtual_outputs();
+  #endif
         }
       }
 #else
       if (display_restore_requested) {
         (void) display_helper_integration::revert();
       }
+  #ifdef __APPLE__
+      // The session's virtual displays stay a while, so a quick reconnect finds them.
+      if (config::video.dd.config_revert_delay.count() > 0) {
+        platf::macos::schedule_virtual_outputs_release(
+          std::chrono::duration_cast<std::chrono::seconds>(config::video.dd.config_revert_delay)
+        );
+      } else {
+        platf::macos::release_virtual_outputs();
+      }
+  #endif
 #endif
 
       if (shared_platform_started) {
@@ -3649,12 +3695,16 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+      // alloc() leaves this STOPPED. Publish STARTING before launching workers,
+      // so their existing startup barrier cannot mistake the initial state for
+      // a cancelled session. RUNNING then releases both workers together.
+      session.state.store(state_e::STARTING, std::memory_order_release);
       if (!session.audio_disabled) {
         session.audioThread = std::thread {audioThread, &session};
       }
       session.videoThread = std::thread {videoThread, &session};
 
-      session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+      session.state.store(state_e::RUNNING, std::memory_order_release);
 
       // Record session in persistent history
       {

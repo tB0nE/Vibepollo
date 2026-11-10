@@ -37,7 +37,8 @@ namespace {
     }
     const auto timestamp = std::filesystem::last_write_time(path, ec);
     if (!ec) {
-      mix_number(value, timestamp.time_since_epoch().count());
+      // libc++ counts file times in __int128, which std::to_string doesn't take.
+      mix_number(value, static_cast<std::int64_t>(timestamp.time_since_epoch().count()));
     } else {
       mix(value, "unstatable");
     }

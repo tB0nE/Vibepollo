@@ -3261,14 +3261,12 @@ namespace webrtc_stream {
       }
 #endif
 
-#if defined(_WIN32) || defined(__linux__)
       std::optional<config::runtime_output_override_lease_t> pending_output_override_lease;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override_lease) {
           (void) config::clear_runtime_output_name_override_if_lease(*pending_output_override_lease);
         }
       });
-#endif
 #ifdef __linux__
       bool linux_private_display_prepared = false;
       auto linux_private_display_guard = util::fail_guard([&]() {

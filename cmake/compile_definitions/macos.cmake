@@ -35,7 +35,8 @@ list(APPEND SUNSHINE_EXTERNAL_LIBRARIES
         ${CORE_MEDIA_LIBRARY}
         ${CORE_VIDEO_LIBRARY}
         ${FOUNDATION_LIBRARY}
-        ${VIDEO_TOOLBOX_LIBRARY})
+        ${VIDEO_TOOLBOX_LIBRARY}
+        ${SCREEN_CAPTURE_KIT_LIBRARY})
 
 set(APPLE_PLIST_TEMPLATE "${SUNSHINE_SOURCE_ASSETS_DIR}/macos/build/Info.plist.in")
 set(APPLE_PLIST_FILE "${CMAKE_BINARY_DIR}/Info.plist")
@@ -50,6 +51,9 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_video.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_video.m"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display.mm"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/display_layout.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/display_multi.mm"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/virtual_display.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/microphone.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/misc.mm"

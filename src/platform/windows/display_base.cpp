@@ -43,6 +43,104 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "src/platform/common.h"
 #include "src/video.h"
 #include "utf_utils.h"
+
+namespace platf::dxgi {
+  namespace {
+    // The Sunshine virtual display's EDID manufacturer is "SDD", which shows in the monitor's
+    // device id. Reading it needs no driver access, so it cannot wait on the virtual-display
+    // locks that a running session holds.
+    bool is_sunshine_virtual_output(const std::string &gdi_name) {
+      const auto wide = utf_utils::from_utf8(gdi_name);
+      DISPLAY_DEVICEW monitor {};
+      monitor.cb = sizeof(monitor);
+      for (DWORD i = 0; EnumDisplayDevicesW(wide.c_str(), i, &monitor, 0); ++i) {
+        if (_wcsnicmp(monitor.DeviceID, L"MONITOR\\SDD", 11) == 0) return true;
+        monitor.cb = sizeof(monitor);
+      }
+      return false;
+    }
+  }  // namespace
+
+  std::optional<std::vector<attached_output_t>> attached_outputs() {
+    if (!std::getenv("METEOR_WINDOWS_MULTIMONITOR")) return std::nullopt;
+    factory1_t factory;
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1,(void **)&factory))) return std::nullopt;
+    std::vector<attached_output_t> outputs;
+    unsigned active_adapters = 0;
+    for (UINT a = 0;; ++a) {
+      adapter_t adapter;
+      auto status = factory->EnumAdapters1(a,&adapter);
+      if (status == DXGI_ERROR_NOT_FOUND) break;
+      if (FAILED(status)) return std::nullopt;
+      bool active = false;
+      for (UINT i = 0;; ++i) {
+        output_t output;
+        status = adapter->EnumOutputs(i,&output);
+        if (status == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(status)) return std::nullopt;
+        DXGI_OUTPUT_DESC desc {};
+        if (FAILED(output->GetDesc(&desc))) return std::nullopt;
+        if (!desc.AttachedToDesktop) continue;
+        active = true;
+        const auto name = utf_utils::to_utf8(desc.DeviceName);
+        outputs.push_back({name, desc.DesktopCoordinates, is_sunshine_virtual_output(name), desc.Rotation == DXGI_MODE_ROTATION_IDENTITY});
+      }
+      active_adapters += active;
+    }
+    // Composition copies between outputs of one GPU; a second active adapter can't join.
+    if (active_adapters != 1 || outputs.empty()) return std::nullopt;
+    // Virtual displays in creation order, which is the order Windows numbers them.
+    const auto number = [](const std::string &name) {
+      const auto digits = name.find_last_not_of("0123456789");
+      return digits + 1 < name.size() ? std::stoi(name.substr(digits + 1)) : 0;
+    };
+    std::stable_sort(outputs.begin(), outputs.end(), [&](const auto &a, const auto &b) {
+      return a.is_virtual == b.is_virtual ? (a.is_virtual && number(a.name) < number(b.name)) : !a.is_virtual;
+    });
+    return outputs;
+  }
+
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count) {
+    const auto outputs = attached_outputs();
+    if (!outputs) return std::nullopt;
+    std::vector<display_plan::physical_t> physical;
+    for (const auto &o : *outputs) {
+      if (o.is_virtual || !o.identity) continue;
+      const auto &r = o.rect;
+      physical.push_back({o.name, r.left, r.top, r.right - r.left, r.bottom - r.top, r.left == 0 && r.top == 0});
+    }
+    const bool virtual_only = requested == capture_outputs::virtual_only_token;
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only);
+  }
+
+  std::optional<display_plan::plan_t> session_plan() {
+    if (auto plan = display_plan::get()) return plan;
+    // A capture that no launch planned (e.g. the encoder probe): stream what is attached.
+    const auto outputs = attached_outputs();
+    if (!outputs) return std::nullopt;
+    const auto virtual_count = std::count_if(outputs->begin(), outputs->end(), [](const auto &o) { return o.is_virtual; });
+    return make_plan(capture_outputs::get(), static_cast<int>(virtual_count));
+  }
+
+  std::vector<std::optional<attached_output_t>> place(const display_plan::plan_t &plan, const std::vector<attached_output_t> &outputs) {
+    std::vector<attached_output_t> virtuals;
+    for (const auto &o : outputs) {
+      if (o.is_virtual) virtuals.push_back(o);
+    }
+    std::vector<std::optional<attached_output_t>> placed;
+    for (const auto &s : plan.screens) {
+      std::optional<attached_output_t> match;
+      if (s.enabled && s.is_virtual) {
+        if (s.virtual_index >= 1 && s.virtual_index <= (int) virtuals.size()) match = virtuals[s.virtual_index - 1];
+      } else if (s.enabled) {
+        const auto it = std::find_if(outputs.begin(), outputs.end(), [&](const auto &o) { return !o.is_virtual && o.name == s.label; });
+        if (it != outputs.end()) match = *it;
+      }
+      placed.push_back(match);
+    }
+    return placed;
+  }
+}
 #include "wgc_capture_policy.h"
 
 namespace platf {
@@ -1769,6 +1867,9 @@ namespace platf {
     const bool prefer_wgc_backend = !user_requested_ddx && (wgc_requested || default_to_wgc);
 
     if (hwdevice_type == mem_type_e::dxgi) {
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        return dxgi::create_multi_display(config, display_name, required_adapter_luid);
+      }
       if (prefer_wgc_backend) {
         auto disp = dxgi::display_wgc_ipc_vram_t::create(config, display_name, required_adapter_luid);
         if (disp || wgc_requested) {
@@ -1781,6 +1882,10 @@ namespace platf {
         return disp;
       }
     } else if (hwdevice_type == mem_type_e::system) {
+      if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
+        BOOST_LOG(error) << "Experimental Windows multi-monitor capture requires a DXGI hardware encoder";
+        return nullptr;
+      }
       if (prefer_wgc_backend) {
         auto disp = dxgi::display_wgc_ipc_ram_t::create(config, display_name, required_adapter_luid);
         if (disp || wgc_requested) {

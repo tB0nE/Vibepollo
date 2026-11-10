@@ -86,8 +86,8 @@
 	url = https://chromium.googlesource.com/chromium/tools/depot_tools.git
 [submodule "third-party/libvirtualdisplay"]
 	path = third-party/libvirtualdisplay
-	url = https://github.com/Nonary/libvirtualdisplay.git
-	branch = master
+	url = https://github.com/tB0nE/libvirtualdisplay.git
+	branch = meteor-windows
 [submodule "third-party/libvirtualgamepad"]
 	path = third-party/libvirtualgamepad
 	url = https://github.com/Nonary/libvirtualgamepad.git

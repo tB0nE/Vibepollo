@@ -377,6 +377,8 @@ function(sunshine_register_component)
     )
 endfunction()
 
+sunshine_register_component(NAME test_component_startup_ping_wait TEST_SOURCE unit/test_startup_ping_wait.cpp)
+sunshine_register_component(NAME test_component_meteor_cursor_scale TEST_SOURCE unit/test_meteor_cursor_scale.cpp)
 sunshine_register_component(NAME test_component_stream_protocol TEST_SOURCE unit/test_stream.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_protocol.cpp")
 sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/test_remote_session.cpp
@@ -529,6 +531,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     sunshine_register_component(NAME test_component_linux_kmsgrab_selection TEST_SOURCE unit/platform/linux/test_kmsgrab_selection.cpp
         LINK_LIBRARIES sunshine_libvirtualdisplay_uapi)
     sunshine_register_component(NAME test_component_linux_kmsgrab_framebuffer TEST_SOURCE unit/platform/linux/test_kmsgrab_framebuffer.cpp)
+    sunshine_register_component(NAME test_component_linux_kscreen_doctor_parser
+        TEST_SOURCE unit/platform/linux/test_kscreen_doctor_parser.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/linux/kscreen_doctor_parser.cpp"
+        LINK_LIBRARIES nlohmann_json::nlohmann_json)
+    sunshine_register_component(NAME test_component_linux_wayland_workspace TEST_SOURCE unit/platform/linux/test_wayland_workspace.cpp)
+    sunshine_register_component(NAME test_component_linux_display_manifest TEST_SOURCE unit/platform/linux/test_display_manifest.cpp)
+    sunshine_register_component(NAME test_component_linux_kwin_virtual_layout TEST_SOURCE unit/platform/linux/test_kwin_virtual_layout.cpp)
     sunshine_register_component(NAME test_component_linux_private_display_cleanup_policy TEST_SOURCE unit/platform/linux/test_private_display_cleanup_policy.cpp)
     sunshine_register_component(NAME test_component_linux_render_device TEST_SOURCE unit/platform/linux/test_render_device.cpp)
     sunshine_register_component(NAME test_component_linux_dmabuf_surface TEST_SOURCE unit/platform/linux/test_dmabuf_surface.cpp)
@@ -594,6 +603,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     sunshine_register_component(NAME test_component_linux_private_display_resume_policy TEST_SOURCE unit/platform/linux/test_private_display_resume_policy.cpp)
     pkg_check_modules(TEST_PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
     if(TEST_PIPEWIRE_FOUND)
+        sunshine_register_component(NAME test_component_linux_pipewire_cursor
+            TEST_SOURCE unit/platform/linux/test_pipewire_cursor.cpp
+            LINK_LIBRARIES PkgConfig::TEST_PIPEWIRE)
         sunshine_register_component(NAME test_component_linux_pipewire_format
             TEST_SOURCE unit/platform/linux/test_pipewire_format.cpp
             LINK_LIBRARIES PkgConfig::TEST_PIPEWIRE)

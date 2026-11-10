@@ -30,6 +30,13 @@ extern "C" {
 #include "thread_pool.h"
 #include "utility.h"
 
+#if defined(__linux__) || defined(_WIN32)
+  #include "platform/linux/display_manifest.h"
+#endif
+#ifdef _WIN32
+  #include <windows.h>
+#endif
+
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
 constexpr int WHEEL_DELTA = 120;
@@ -640,9 +647,21 @@ namespace input {
     // Windows/macOS apply monitor offsets in platform code, so adding offsets here
     // would double-apply them and clamp input to edges.
 #ifdef __linux__
+    // Monitors packed into rows each sit somewhere else on the desktop.
+    if (touch_port.frame_tiles) {
+      return platf::frame_to_desktop(*touch_port.frame_tiles, x / touch_port.scalar_tpcoords, y / touch_port.scalar_tpcoords);
+    }
     float final_x = (x + touch_port.offset_x * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
     float final_y = (y + touch_port.offset_y * touch_port.scalar_tpcoords) / touch_port.scalar_tpcoords;
 #else
+  #ifdef _WIN32
+    // Monitors tiled into one frame sit elsewhere on the desktop. The result is an absolute
+    // desktop position; the capture's offset (the virtual screen's origin) turns it into the
+    // coordinates the mouse API wants.
+    if (touch_port.frame_tiles) {
+      return platf::frame_to_desktop(*touch_port.frame_tiles, x / touch_port.scalar_tpcoords, y / touch_port.scalar_tpcoords);
+    }
+  #endif
     float final_x = x / touch_port.scalar_tpcoords;
     float final_y = y / touch_port.scalar_tpcoords;
 #endif
@@ -726,6 +745,14 @@ namespace input {
       touch_port_dim_x,
       touch_port_dim_y
     };
+#ifdef _WIN32
+    // A tiled frame maps to absolute desktop positions. Normalise them against the desktop as
+    // it is now: virtual displays attach and move after the capture started.
+    if (touch_port.frame_tiles) {
+      abs_port = {-GetSystemMetrics(SM_XVIRTUALSCREEN), -GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+    }
+#endif
 
     mouse_controller->move_absolute(
       {abs_port.offset_x, abs_port.offset_y, abs_port.width, abs_port.height},

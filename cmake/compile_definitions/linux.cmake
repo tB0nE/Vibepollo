@@ -1,3 +1,7 @@
+if(SUNSHINE_BUILD_METEOR)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_METEOR=1)
+endif()
+
 # linux specific compile definitions
 
 if(FREEBSD)
@@ -257,6 +261,11 @@ if(PIPEWIRE_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewire.cpp")
 endif()
 
+# KDE output metadata is shared by portal and direct KWin capture.
+if(SUNSHINE_ENABLE_PORTAL OR SUNSHINE_ENABLE_KWIN)
+    list(APPEND PLATFORM_TARGET_FILES "${CMAKE_SOURCE_DIR}/src/platform/linux/kscreen_doctor_parser.cpp")
+endif()
+
 # XDG portal
 if(SUNSHINE_ENABLE_GAMESCOPE)
     if(NOT WAYLAND_FOUND OR NOT PIPEWIRE_FOUND)
@@ -288,6 +297,10 @@ if(PIPEWIRE_FOUND AND WAYLAND_FOUND AND ${SUNSHINE_ENABLE_KWIN})
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/plasma-wayland-protocols/src/protocols" "" zkde-screencast-unstable-v1)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
+    # GNOME's Mutter ScreenCast/DisplayConfig, through the same PipeWire capture code.
+    add_compile_definitions(SUNSHINE_BUILD_MUTTER)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/muttergrab.cpp")
 elseif(${SUNSHINE_ENABLE_KWIN} AND NOT WAYLAND_FOUND)
     message(FATAL_ERROR "SUNSHINE_ENABLE_KWIN requires SUNSHINE_ENABLE_WAYLAND — KWin capture disabled")
 endif()

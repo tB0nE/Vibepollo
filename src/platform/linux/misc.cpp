@@ -53,6 +53,8 @@
 
 // local includes
 #include "graphics.h"
+#include "wayland_workspace.h"
+#include "src/capture_outputs.h"
 #include "misc.h"
 #ifdef SUNSHINE_BUILD_NVFBC_VK
   #include "nvfbc_vk.h"
@@ -1247,6 +1249,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_PORTAL
       PORTAL,  ///< XDG PORTAL
 #endif
+#ifdef SUNSHINE_BUILD_MUTTER
+      MUTTER,  ///< GNOME Mutter ScreenCast
+#endif
       MAX_FLAGS  ///< The maximum number of flags
     };
   }  // namespace source
@@ -1311,6 +1316,16 @@ namespace platf {
 #endif
 
 #ifdef SUNSHINE_BUILD_KWIN
+#ifdef SUNSHINE_BUILD_MUTTER
+  bool mutter_available();
+  std::vector<std::string> mutter_display_names();
+  std::shared_ptr<display_t> mutter_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+
+  bool verify_mutter() {
+    return window_system == window_system_e::WAYLAND && mutter_available() && !mutter_display_names().empty();
+  }
+#endif
+
   bool kwin_available();
   std::vector<std::string> kwin_display_names();
   std::shared_ptr<display_t> kwin_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
@@ -1374,6 +1389,11 @@ namespace platf {
     }
 #endif
 #ifdef SUNSHINE_BUILD_KWIN
+#ifdef SUNSHINE_BUILD_MUTTER
+    if (sources[source::MUTTER]) {
+      return mutter_display_names();
+    }
+#endif
     if (sources[source::KWIN]) {
       return kwin_display_names();
     }
@@ -1438,6 +1458,20 @@ namespace platf {
     const std::optional<adapter_id_t> &required_adapter
   ) {
     (void) required_adapter;
+#ifdef SUNSHINE_BUILD_KWIN
+  #ifdef SUNSHINE_BUILD_MUTTER
+    const bool mutter_selected = sources[source::MUTTER];
+  #else
+    const bool mutter_selected = false;
+  #endif
+    if (use_kwin_workspace(window_system == window_system_e::WAYLAND,
+          config::video.capture, capture_outputs::get(), mutter_selected)) {
+      // KWin supplies all selected monitors in one native region stream. Never
+      // let the generic single-output portal fallback consume this request.
+      BOOST_LOG(info) << "Screencasting selected monitors with KWin workspace capture"sv;
+      return kwin_display(hwdevice_type, requested_display_name, config);
+    }
+#endif
     auto display_name = requested_display_name;
 #ifdef __linux__
     display_name = linux_display::backend().capture_target(requested_display_name);
@@ -1564,6 +1598,12 @@ namespace platf {
       return kwin_display(hwdevice_type, display_name, config);
     }
 #endif
+#ifdef SUNSHINE_BUILD_MUTTER
+    if (sources[source::MUTTER]) {
+      BOOST_LOG(info) << "Screencasting with Mutter ScreenCast"sv;
+      return mutter_display(hwdevice_type, display_name, config);
+    }
+#endif
 
     return nullptr;
   }
@@ -1608,14 +1648,23 @@ namespace platf {
 #else
     bool native_compositor_selected = false;
 #endif
-#if defined(SUNSHINE_BUILD_STEAMOS) && defined(SUNSHINE_BUILD_KWIN)
-    // Desktop Mode provides KWin's native screencast interface. Select it
+#ifdef SUNSHINE_BUILD_KWIN
+    // KDE provides KWin's native screencast interface. Select it
     // before portal enumeration, which can open an interactive consent dialog.
     // Gaming Mode keeps the Gamescope backend selected above.
     if (config::video.capture.empty() && sources.none() && verify_kwin()) {
       sources[source::KWIN] = true;
       native_compositor_selected = true;
-      BOOST_LOG(info) << "Using KWin compositor capture for SteamOS Desktop Mode."sv;
+      BOOST_LOG(info) << "Using KWin compositor capture for KDE Wayland."sv;
+    }
+#endif
+#ifdef SUNSHINE_BUILD_MUTTER
+    // GNOME's own screencast interface needs no consent dialog and streams each monitor at its
+    // own rate. Prefer it to the portal for the same reason as KWin above.
+    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "mutter") && verify_mutter()) {
+      sources[source::MUTTER] = true;
+      native_compositor_selected = true;
+      BOOST_LOG(info) << "Using Mutter compositor capture for GNOME Wayland."sv;
     }
 #endif
 #if defined(SUNSHINE_BUILD_NVFBC_VK) && !defined(SUNSHINE_BUILD_CUDA)

@@ -14,6 +14,16 @@ option(BUILD_WERROR "Enable -Werror flag." OFF)
 # if this option is set, the build will exit after configuring special package configuration files
 option(SUNSHINE_CONFIGURE_ONLY "Configure special files only, then exit." OFF)
 
+# User-local, relocatable host managed by Nightfall Meteor. Does not install
+# machine services, kernel modules or capabilities.
+option(SUNSHINE_BUILD_METEOR "Build the portable Meteor-managed host" OFF)
+if(SUNSHINE_BUILD_METEOR)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "Meteor host packaging currently targets Linux")
+    endif()
+    set(SUNSHINE_ASSETS_DIR "share/vibepollo")
+endif()
+
 option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." ON)
 option(SUNSHINE_ENABLE_WEBRTC "Enable WebRTC streaming support (Windows only)." OFF)
 

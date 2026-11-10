@@ -112,6 +112,8 @@ namespace display_helper_integration::helpers {
       snapshot.virtual_display_ready_since = session.virtual_display_ready_since;
       snapshot.virtual_display_hdr_enabled = session.virtual_display_hdr_enabled;
       snapshot.virtual_display_topology_snapshot = session.virtual_display_topology_snapshot;
+      snapshot.extra_virtual_displays = session.extra_virtual_displays;
+      snapshot.extra_virtual_display_device_ids = session.extra_virtual_display_device_ids;
       snapshot.pre_virtual_display_refresh_rates = session.pre_virtual_display_refresh_rates;
       snapshot.gen1_framegen_fix = session.gen1_framegen_fix;
       snapshot.gen2_framegen_fix = session.gen2_framegen_fix;
@@ -613,6 +615,20 @@ namespace display_helper_integration::helpers {
         if (!already_present) {
           merged_topology.push_back({merged_device_id});
         }
+        for (const auto &extra_device_id : session_.extra_virtual_display_device_ids) {
+          const auto extra_present = std::any_of(
+            merged_topology.begin(),
+            merged_topology.end(),
+            [&](const std::vector<std::string> &group) {
+              return std::any_of(group.begin(), group.end(), [&](const std::string &device_id) {
+                return boost::iequals(device_id, extra_device_id);
+              });
+            }
+          );
+          if (!extra_present) {
+            merged_topology.push_back({extra_device_id});
+          }
+        }
         if (!merged_topology.empty()) {
           topology.topology = std::move(merged_topology);
           topology_overridden = true;
@@ -764,6 +780,18 @@ namespace display_helper_integration::helpers {
     }
 
     topology.monitor_positions[isolated_device_id] = display_device::Point {kIsolatedVirtualDisplayOffset, kIsolatedVirtualDisplayOffset};
+
+    // Extra virtual displays sit in a row to the right of the first so that, like it,
+    // they stay clear of the physical monitors while touching each other.
+    const int extra_width = session_.resolution_override ? session_.resolution_override->width : session_.width;
+    int extra_index = 1;
+    for (const auto &extra_device_id : session_.extra_virtual_display_device_ids) {
+      topology.monitor_positions[extra_device_id] = display_device::Point {
+        safe_add_int(kIsolatedVirtualDisplayOffset, extra_index * std::max(extra_width, 1)),
+        kIsolatedVirtualDisplayOffset
+      };
+      ++extra_index;
+    }
   }
 
   rtsp_stream::launch_session_t make_display_request_session_snapshot(const rtsp_stream::launch_session_t &session) {

@@ -171,6 +171,7 @@ namespace display_helper::v2 {
     bool reset_staged_apply_state();
 
   private:
+    void restore_requested_topology_members(const ApplyRequest &request, const CancellationToken &token);
     void apply_monitor_positions(const ApplyRequest &request, const CancellationToken &token);
     void apply_refresh_rate_overrides(const ApplyRequest &request, const CancellationToken &token);
 

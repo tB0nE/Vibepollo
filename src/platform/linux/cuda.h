@@ -110,6 +110,12 @@ namespace cuda {
 
     int copy(std::uint8_t *src, int height, int pitch);
 
+    /**
+     * Copies a `width_bytes` x `height` block from device memory with pitch `src_pitch` to
+     * (`dst_x_bytes`, `dst_y`) in the texture.
+     */
+    int copy_rect(const std::uint8_t *src, int src_pitch, int dst_x_bytes, int dst_y, int width_bytes, int height);
+
     cudaArray_t array;
 
     struct texture {

@@ -30,6 +30,7 @@ namespace linux_cuda {
     tcuMemcpyDtoD_v2 *cuMemcpyDtoD = nullptr;
     tcuMemcpyHtoD_v2 *cuMemcpyHtoD = nullptr;
     tcuMemcpyDtoH_v2 *cuMemcpyDtoH = nullptr;
+    tcuMemcpy2D_v2 *cuMemcpy2D = nullptr;
     tcuStreamSynchronize *cuStreamSynchronize = nullptr;
     tcuGetErrorString *cuGetErrorString = nullptr;
     tcuImportExternalMemory *cuImportExternalMemory = nullptr;

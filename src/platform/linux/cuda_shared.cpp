@@ -35,6 +35,7 @@ namespace linux_cuda {
                       load(lib, f.cuCtxPushCurrent, "cuCtxPushCurrent_v2") && load(lib, f.cuCtxPopCurrent, "cuCtxPopCurrent_v2") &&
                       load(lib, f.cuMemAlloc, "cuMemAlloc_v2") && load(lib, f.cuMemFree, "cuMemFree_v2") && load(lib, f.cuMemcpyDtoD, "cuMemcpyDtoD_v2") &&
                       load(lib, f.cuMemcpyHtoD, "cuMemcpyHtoD_v2") && load(lib, f.cuMemcpyDtoH, "cuMemcpyDtoH_v2") &&
+                      load(lib, f.cuMemcpy2D, "cuMemcpy2D_v2") &&
                       load(lib, f.cuStreamSynchronize, "cuStreamSynchronize") && load(lib, f.cuGetErrorString, "cuGetErrorString") &&
                       load(lib, f.cuImportExternalMemory, "cuImportExternalMemory") &&
                       load(lib, f.cuExternalMemoryGetMappedBuffer, "cuExternalMemoryGetMappedBuffer") && load(lib, f.cuDestroyExternalMemory, "cuDestroyExternalMemory");

@@ -3,6 +3,8 @@
  * @brief Definitions for x11 capture.
  */
 // standard includes
+#include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <thread>
 
@@ -21,9 +23,11 @@
 #include "cuda.h"
 #include "graphics.h"
 #include "misc.h"
+#include "src/capture_outputs.h"
 #include "src/config.h"
 #include "src/globals.h"
 #include "src/logging.h"
+#include "src/meteor_cursor_scale.h"
 #include "src/platform/common.h"
 #include "src/task_pool.h"
 #include "src/video.h"
@@ -57,6 +61,7 @@ namespace platf {
       _FN(FreeScreenResources, void, (XRRScreenResources * resources));
       _FN(FreeOutputInfo, void, (XRROutputInfo * outputInfo));
       _FN(FreeCrtcInfo, void, (XRRCrtcInfo * crtcInfo));
+      _FN(GetOutputPrimary, RROutput, (Display * dpy, Window window));
 
       static int init() {
         static void *handle {nullptr};
@@ -80,6 +85,7 @@ namespace platf {
           {(dyn::apiproc *) &FreeScreenResources, "XRRFreeScreenResources"},
           {(dyn::apiproc *) &FreeOutputInfo, "XRRFreeOutputInfo"},
           {(dyn::apiproc *) &FreeCrtcInfo, "XRRFreeCrtcInfo"},
+          {(dyn::apiproc *) &GetOutputPrimary, "XRRGetOutputPrimary"},
         };
 
         if (dyn::load(handle, funcs)) {
@@ -304,6 +310,8 @@ namespace platf {
 
   struct x11_img_t: public img_t {
     ximg_t img;
+    // The frame when monitors are packed into rows, assembled from one XImage per monitor.
+    std::vector<std::uint8_t> tiled;
   };
 
   struct shm_img_t: public img_t {
@@ -321,44 +329,117 @@ namespace platf {
       return;
     }
 
-    overlay->x -= overlay->xhot;
-    overlay->y -= overlay->yhot;
+    meteor_cursor::blend(img.data, img.width, img.height, img.row_pitch,
+                         overlay->pixels, overlay->width, overlay->height,
+                         overlay->x - offsetX, overlay->y - offsetY,
+                         overlay->xhot, overlay->yhot, meteor_cursor::current_scale());
+  }
 
-    overlay->x -= offsetX;
-    overlay->y -= offsetY;
-
-    overlay->x = std::max((short) 0, overlay->x);
-    overlay->y = std::max((short) 0, overlay->y);
-
-    auto pixels = (int *) img.data;
-
-    auto screen_height = img.height;
-    auto screen_width = img.width;
-
-    auto delta_height = std::min<uint16_t>(overlay->height, std::max(0, screen_height - overlay->y));
-    auto delta_width = std::min<uint16_t>(overlay->width, std::max(0, screen_width - overlay->x));
-    for (auto y = 0; y < delta_height; ++y) {
-      auto overlay_begin = &overlay->pixels[y * overlay->width];
-      auto overlay_end = &overlay->pixels[y * overlay->width + delta_width];
-
-      auto pixels_begin = &pixels[(y + overlay->y) * (img.row_pitch / img.pixel_pitch) + overlay->x];
-
-      std::for_each(overlay_begin, overlay_end, [&](long pixel) {
-        int *pixel_p = (int *) &pixel;
-
-        auto colors_in = (uint8_t *) pixels_begin;
-
-        auto alpha = (*(uint *) pixel_p) >> 24u;
-        if (alpha == 255) {
-          *pixels_begin = *pixel_p;
-        } else {
-          auto colors_out = (uint8_t *) pixel_p;
-          colors_in[0] = colors_out[0] + (colors_in[0] * (255 - alpha) + 255 / 2) / 255;
-          colors_in[1] = colors_out[1] + (colors_in[1] * (255 - alpha) + 255 / 2) / 255;
-          colors_in[2] = colors_out[2] + (colors_in[2] * (255 - alpha) + 255 / 2) / 255;
+  /**
+   * @brief Every connected RandR output. One without a CRTC isn't showing anything, so it is
+   *        listed as not capturable, sized by its preferred mode.
+   */
+  static std::vector<output_descriptor_t> connected_outputs(Display *xdisplay, Window xwindow) {
+    std::vector<output_descriptor_t> outputs;
+    screen_res_t screenr {x11::rr::GetScreenResources(xdisplay, xwindow)};
+    if (!screenr) {
+      return outputs;
+    }
+    const RROutput primary = x11::rr::GetOutputPrimary(xdisplay, xwindow);
+    for (int i = 0; i < screenr->noutput; ++i) {
+      output_info_t out_info {x11::rr::GetOutputInfo(xdisplay, screenr.get(), screenr->outputs[i])};
+      if (!out_info || out_info->connection != RR_Connected) {
+        continue;
+      }
+      output_descriptor_t desc;
+      desc.name = out_info->name ? out_info->name : "";
+      desc.primary = screenr->outputs[i] == primary;
+      crtc_info_t crt_info;
+      if (out_info->crtc) {
+        crt_info.reset(x11::rr::GetCrtcInfo(xdisplay, screenr.get(), out_info->crtc));
+      }
+      if (crt_info && crt_info->width && crt_info->height) {
+        desc.x = crt_info->x;
+        desc.y = crt_info->y;
+        desc.width = (int) crt_info->width;
+        desc.height = (int) crt_info->height;
+      } else {
+        desc.capturable = false;
+        for (int m = 0; out_info->nmode > 0 && m < screenr->nmode; ++m) {
+          if (screenr->modes[m].id == out_info->modes[0]) {
+            desc.width = (int) screenr->modes[m].width;
+            desc.height = (int) screenr->modes[m].height;
+            break;
+          }
         }
-        ++pixels_begin;
-      });
+      }
+      outputs.push_back(std::move(desc));
+    }
+    return outputs;
+  }
+
+  /**
+   * @brief The name of the output at `index` in x11_display_names() order (every output,
+   *        connected or not), which is how output_name selects one.
+   */
+  static std::string output_name_at(Display *xdisplay, Window xwindow, int index) {
+    screen_res_t screenr {x11::rr::GetScreenResources(xdisplay, xwindow)};
+    for (int x = 0, i = 0; screenr && x < screenr->noutput; ++x) {
+      output_info_t out_info {x11::rr::GetOutputInfo(xdisplay, screenr.get(), screenr->outputs[x])};
+      if (out_info && i++ == index) {
+        return out_info->name ? out_info->name : "";
+      }
+    }
+    return {};
+  }
+
+  /**
+   * @brief The region the session's outputs= selects, or nothing when it didn't ask.
+   */
+  static std::optional<capture_region_t> session_region(Display *xdisplay, Window xwindow, const XWindowAttributes &xattr) {
+    const auto available = connected_outputs(xdisplay, xwindow);
+    const auto only = split_csv(capture_outputs::initial_selection(
+      capture_outputs::get(), config::get_active_output_name(),
+      std::getenv("METEOR_DEFAULT_PRIMARY_OUTPUT") != nullptr, available));
+    if (only.empty()) {
+      return std::nullopt;
+    }
+    return compute_packed_capture_region_from_outputs(connected_outputs(xdisplay, xwindow), xattr.width, xattr.height, only);
+  }
+
+  static void log_region(const capture_region_t &region) {
+    BOOST_LOG(info) << "Multi-monitor capture ["sv << capture_outputs::get() << "]: "sv << region.width << 'x' << region.height
+                    << (region.tiled ? " packed into rows"sv : ""sv);
+    for (const auto &m : region.monitors) {
+      BOOST_LOG(info) << "  "sv << (m.enabled ? "[in]  "sv : "[out] "sv) << m.label << ' ' << m.desktop_w << 'x' << m.desktop_h << '+'
+                      << m.desktop_x << '+' << m.desktop_y << (m.enabled ? " -> frame +" + std::to_string(m.frame_x) + '+' + std::to_string(m.frame_y) : "");
+    }
+  }
+
+  /**
+   * @brief Copies `rows` rows of `row_bytes` between two images with their own pitches.
+   */
+  static void copy_rows(std::uint8_t *dst, std::size_t dst_pitch, const std::uint8_t *src, std::size_t src_pitch, std::size_t row_bytes, int rows) {
+    for (int row = 0; row < rows; ++row) {
+      std::memcpy(dst + row * dst_pitch, src + row * src_pitch, row_bytes);
+    }
+  }
+
+  /**
+   * @brief Blends the cursor into the one tile it is over.
+   */
+  static void blend_cursor_tiled(Display *display, img_t &img, const std::vector<frame_tile_t> &tiles) {
+    xcursor_t c {x11::fix::GetCursorImage(display)};
+    if (!c) {
+      return;
+    }
+    const int x = c->x;
+    const int y = c->y;
+    for (const auto &tile : tiles) {
+      if (x >= tile.desktop_x && x < tile.desktop_x + tile.width && y >= tile.desktop_y && y < tile.desktop_y + tile.height) {
+        blend_cursor(display, img, tile.desktop_x - tile.frame_x, tile.desktop_y - tile.frame_y);
+        return;
+      }
     }
   }
 
@@ -396,6 +477,18 @@ namespace platf {
       xwindow = DefaultRootWindow(xdisplay.get());
 
       refresh();
+
+      env_width = xattr.width;
+      env_height = xattr.height;
+      if (const auto region = session_region(xdisplay.get(), xwindow, xattr)) {
+        log_region(*region);
+        width = region->width;
+        height = region->height;
+        offset_x = region->offset_x;
+        offset_y = region->offset_y;
+        frame_tiles = frame_tiles_of(*region);
+        return 0;
+      }
 
       int streamedMonitor = -1;
       if (!display_name.empty()) {
@@ -515,6 +608,10 @@ namespace platf {
       }
       auto img = (x11_img_t *) img_out.get();
 
+      if (!frame_tiles.empty()) {
+        return snapshot_tiled(img, cursor);
+      }
+
       XImage *x_img {x11::GetImage(xdisplay.get(), xwindow, offset_x, offset_y, width, height, AllPlanes, ZPixmap)};
       img->frame_timestamp = std::chrono::steady_clock::now();
 
@@ -529,6 +626,33 @@ namespace platf {
         blend_cursor(xdisplay.get(), *img, offset_x, offset_y);
       }
 
+      return capture_e::ok;
+    }
+
+    // Grabs each monitor on its own and copies it to its place in the packed frame.
+    capture_e snapshot_tiled(x11_img_t *img, bool cursor) {
+      const std::size_t pitch = std::size_t(width) * 4;
+      img->tiled.resize(pitch * height);
+      img->img.reset();
+      img->width = width;
+      img->height = height;
+      img->pixel_pitch = 4;
+      img->row_pitch = (int) pitch;
+      img->data = img->tiled.data();
+      img->frame_timestamp = std::chrono::steady_clock::now();
+
+      for (const auto &tile : frame_tiles) {
+        ximg_t grabbed {x11::GetImage(xdisplay.get(), xwindow, tile.desktop_x, tile.desktop_y, tile.width, tile.height, AllPlanes, ZPixmap)};
+        if (!grabbed) {
+          BOOST_LOG(warning) << "Couldn't grab the monitor at "sv << tile.desktop_x << ',' << tile.desktop_y;
+          continue;
+        }
+        copy_rows(img->tiled.data() + tile.frame_y * pitch + std::size_t(tile.frame_x) * 4, pitch, (const std::uint8_t *) grabbed->data, grabbed->bytes_per_line, std::size_t(tile.width) * 4, tile.height);
+      }
+
+      if (cursor) {
+        blend_cursor_tiled(xdisplay.get(), *img, frame_tiles);
+      }
       return capture_e::ok;
     }
 
@@ -645,6 +769,8 @@ namespace platf {
       if (xattr.width != env_width || xattr.height != env_height) {
         BOOST_LOG(warning) << "X dimensions changed in SHM mode, request reinit"sv;
         return capture_e::reinit;
+      } else if (!frame_tiles.empty()) {
+        return snapshot_tiled(pull_free_image_cb, img_out, cursor);
       } else {
         auto img_cookie = xcb::shm_get_image_unchecked(xcb.get(), display->root, offset_x, offset_y, width, height, ~0, XCB_IMAGE_FORMAT_Z_PIXMAP, seg, 0);
         auto frame_timestamp = std::chrono::steady_clock::now();
@@ -670,13 +796,39 @@ namespace platf {
       }
     }
 
+    // Grabs each monitor into the segment (sized for the whole frame) and copies it to its
+    // place in the packed frame.
+    capture_e snapshot_tiled(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, bool cursor) {
+      if (!pull_free_image_cb(img_out)) {
+        return platf::capture_e::interrupted;
+      }
+      img_out->frame_timestamp = std::chrono::steady_clock::now();
+
+      for (const auto &tile : frame_tiles) {
+        auto cookie = xcb::shm_get_image_unchecked(xcb.get(), display->root, tile.desktop_x, tile.desktop_y, tile.width, tile.height, ~0, XCB_IMAGE_FORMAT_Z_PIXMAP, seg, 0);
+        xcb_img_t reply {xcb::shm_get_image_reply(xcb.get(), cookie, nullptr)};
+        if (!reply) {
+          BOOST_LOG(error) << "Could not get image reply"sv;
+          return capture_e::reinit;
+        }
+        const std::size_t row_bytes = std::size_t(tile.width) * 4;
+        copy_rows(img_out->data + tile.frame_y * img_out->row_pitch + std::size_t(tile.frame_x) * 4, img_out->row_pitch, (const std::uint8_t *) data.data, row_bytes, row_bytes, tile.height);
+      }
+
+      if (cursor) {
+        blend_cursor_tiled(shm_xdisplay.get(), *img_out, frame_tiles);
+      }
+      return capture_e::ok;
+    }
+
     std::shared_ptr<img_t> alloc_img() override {
       auto img = std::make_shared<shm_img_t>();
       img->width = width;
       img->height = height;
       img->pixel_pitch = 4;
       img->row_pitch = img->pixel_pitch * width;
-      img->data = new std::uint8_t[height * img->row_pitch];
+      // Zeroed: a packed frame leaves gaps between monitors of different heights.
+      img->data = new std::uint8_t[height * img->row_pitch]();
 
       return img;
     }
@@ -800,6 +952,65 @@ namespace platf {
     return names;
   }
 
+  std::optional<capture_region_t> x11_session_region() {
+    // Under Wayland, XWayland's outputs aren't the ones being captured.
+    if (window_system != window_system_e::X11 || capture_outputs::get().empty() || x11::init() || x11::rr::init()) {
+      return std::nullopt;
+    }
+    x11::xdisplay_t xdisplay {x11::OpenDisplay(nullptr)};
+    if (!xdisplay) {
+      return std::nullopt;
+    }
+    const auto xwindow = DefaultRootWindow(xdisplay.get());
+    XWindowAttributes xattr {};
+    x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr);
+    auto region = session_region(xdisplay.get(), xwindow, xattr);
+    if (region) {
+      log_region(*region);
+    }
+    return region;
+  }
+
+  std::optional<desktop_manifest_t> x11_query_desktop_manifest(const std::string &outputs) {
+    if (window_system != window_system_e::X11 || x11::init() || x11::rr::init()) {
+      return std::nullopt;
+    }
+    x11::xdisplay_t xdisplay {x11::OpenDisplay(nullptr)};
+    if (!xdisplay) {
+      return std::nullopt;
+    }
+    const auto xwindow = DefaultRootWindow(xdisplay.get());
+    XWindowAttributes xattr {};
+    x11::GetWindowAttributes(xdisplay.get(), xwindow, &xattr);
+
+    const auto available = connected_outputs(xdisplay.get(), xwindow);
+    auto only = split_csv(capture_outputs::initial_selection(
+      outputs, config::get_active_output_name(),
+      std::getenv("METEOR_DEFAULT_PRIMARY_OUTPUT") != nullptr, available));
+    if (only.empty()) {
+      // What capture uses without outputs=: output_name's monitor, else the whole desktop.
+      const auto name = config::get_active_output_name();
+      if (!name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return std::isdigit(c);
+          })) {
+        if (auto label = output_name_at(xdisplay.get(), xwindow, std::stoi(name)); !label.empty()) {
+          only.push_back(std::move(label));
+        }
+      }
+    }
+
+    const auto region = compute_packed_capture_region_from_outputs(connected_outputs(xdisplay.get(), xwindow), xattr.width, xattr.height, only);
+    desktop_manifest_t manifest;
+    manifest.frame_width = region.width;
+    manifest.frame_height = region.height;
+    manifest.desktop_width = xattr.width;
+    manifest.desktop_height = xattr.height;
+    manifest.monitors = region.monitors;
+    manifest.contiguous = region.contiguous;
+    manifest.tiled = region.tiled;
+    return manifest;
+  }
+
   void freeImage(XImage *p) {
     XDestroyImage(p);
   }
@@ -842,6 +1053,8 @@ namespace platf {
 
       xcursor_t xcursor = fix::GetCursorImage(display);
 
+      if (!xcursor) return;
+      const int scale = meteor_cursor::current_scale();
       if (img.serial != xcursor->cursor_serial) {
         auto buf_size = xcursor->width * xcursor->height * sizeof(int);
 
@@ -855,12 +1068,14 @@ namespace platf {
       }
 
       img.data = img.buffer.data();
-      img.width = img.src_w = xcursor->width;
-      img.height = img.src_h = xcursor->height;
-      img.x = xcursor->x - xcursor->xhot;
-      img.y = xcursor->y - xcursor->yhot;
+      img.src_w = xcursor->width;
+      img.src_h = xcursor->height;
+      img.width = img.src_w * scale;
+      img.height = img.src_h * scale;
+      img.x = xcursor->x - xcursor->xhot * scale;
+      img.y = xcursor->y - xcursor->yhot * scale;
       img.pixel_pitch = 4;
-      img.row_pitch = img.pixel_pitch * img.width;
+      img.row_pitch = img.pixel_pitch * img.src_w;
       img.serial = xcursor->cursor_serial;
     }
 
