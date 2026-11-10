@@ -1264,24 +1264,6 @@ namespace kwin {
     return screen.is_virtual ? platf::kwin_virtual::output_name(screen.virtual_index) : screen.label;
   }
 
-  /// Writes the plan's primary rectangle for Meteor's depth crop (see publish_capture_region()).
-  void publish_plan_region(const display_plan::plan_t &plan) {
-    platf::wayland_workspace_t workspace;
-    workspace.manifest.frame_width = plan.frame_width;
-    workspace.manifest.frame_height = plan.frame_height;
-    for (const auto *screen : plan.enabled()) {
-      platf::monitor_manifest_entry_t entry;
-      entry.enabled = true;
-      entry.is_primary = screen->is_primary;
-      entry.frame_x = screen->frame_x;
-      entry.frame_y = screen->frame_y;
-      entry.frame_w = screen->width;
-      entry.frame_h = screen->height;
-      workspace.manifest.monitors.push_back(entry);
-    }
-    publish_capture_region(workspace);
-  }
-
   /**
    * Several screens, each its own KWin stream, packed into the plan's frame. KWin streams one
    * output at that output's rate, so any set of monitors and virtual monitors keeps full rate.
@@ -1310,6 +1292,7 @@ namespace kwin {
         source.frame_y = screen->frame_y;
         source.width = screen->width;
         source.height = screen->height;
+        source.is_primary = screen->is_primary;
         const auto at = std::find_if(descriptors.begin(), descriptors.end(), [&](const auto &out) {
           return out.name == name;
         });
@@ -1318,7 +1301,6 @@ namespace kwin {
         sources.push_back(source);
         casts.push_back(std::move(cast));
       }
-      publish_plan_region(plan);
       BOOST_LOG(info) << "[kwingrab] Packing "sv << sources.size() << " screens into "sv << plan.frame_width << 'x' << plan.frame_height;
       return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config);
     }

@@ -13,7 +13,11 @@
 #pragma once
 
 // standard includes
+#include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,7 +38,32 @@ namespace pipewire_multi {
     int desktop_x = 0, desktop_y = 0;
     /// Ask for exactly this maximum rate (see add_framerate_parameters()); 0 for any.
     int max_framerate = 0;
+    /// The session's primary screen: Meteor's host depth crops to it (see publish_primary_region()).
+    bool is_primary = false;
   };
+
+  /**
+   * Meteor's host depth covers the primary screen only. With several screens in the frame, write
+   * where the primary is (frame size, then x y w h) at the path Meteor names; with one, remove
+   * the file. Same format as Windows and KWin's region capture.
+   */
+  inline void publish_primary_region(const std::vector<screen_source_t> &sources, int frame_w, int frame_h) {
+    const char *path = std::getenv("METEOR_CAPTURE_REGION_FILE");
+    if (!path || !*path) {
+      return;
+    }
+    std::error_code ignored;
+    const auto primary = std::find_if(sources.begin(), sources.end(), [](const auto &s) {
+      return s.is_primary;
+    });
+    if (sources.size() < 2 || primary == sources.end()) {
+      std::filesystem::remove(path, ignored);
+      return;
+    }
+    std::ofstream out {path, std::ios::trunc};
+    out << frame_w << ' ' << frame_h << ' ' << primary->frame_x << ' ' << primary->frame_y << ' ' << primary->width << ' '
+        << primary->height << '\n';
+  }
 
   /// One screen's stream. The packer owns input geometry, so this only negotiates and hands out frames.
   class source_display_t: public pipewire::pipewire_display_t {
@@ -128,6 +157,7 @@ namespace pipewire_multi {
      * @param frame_w, frame_h The plan's frame size.
      */
     int init(platf::mem_type_e type, std::vector<screen_source_t> sources_in, int frame_w, int frame_h, const ::video::config_t &config) {
+      publish_primary_region(sources_in, frame_w, frame_h);
       mem_type = type;
       width = frame_w;
       height = frame_h;

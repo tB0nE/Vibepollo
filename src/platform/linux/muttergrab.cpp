@@ -450,6 +450,7 @@ namespace mutter {
         source.frame_y = screen->frame_y;
         source.width = screen->width;
         source.height = screen->height;
+        source.is_primary = screen->is_primary;
         for (const auto &m : state->monitors) {
           if (m.connector == connector) {
             source.desktop_x = m.x;
