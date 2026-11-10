@@ -67,6 +67,7 @@ extern "C" {
   #include "src/platform/windows/display_vram.h"
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/rtx_hdr_runtime.h"
+  #include "src/amf/amf_d3d11.h"
   #include "src/platform/windows/virtual_display.h"
   #include "uuid.h"
 
@@ -7526,6 +7527,14 @@ namespace video {
       if (new_encoder == &vaapi) {
         if (const int va_max = va::max_encode_axis(); va_max > 0) {
           max_axis = std::min(max_axis, va_max);
+        }
+      }
+#endif
+#ifdef _WIN32
+      // Older AMD encoders (Polaris and earlier) stop at 4096 per side, HEVC included.
+      if (new_encoder->name.starts_with("amdvce"sv)) {
+        if (const int amf_max = amf::max_encode_axis(); amf_max > 0) {
+          max_axis = std::min(max_axis, amf_max);
         }
       }
 #endif

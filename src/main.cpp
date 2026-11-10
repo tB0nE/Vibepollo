@@ -50,6 +50,7 @@
   #include <shobjidl.h>
 
   #include "src/display_helper_integration.h"
+  #include "src/amf/amf_d3d11.h"
   #include "src/platform/windows/frame_limiter_nvcp.h"
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/playnite_integration.h"
@@ -342,12 +343,20 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
   if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
     // --meteor-display-layout [outputs|@virtual] [virtual displays]: the plan a launch would get.
+    // An AMD encoder's own limit applies, as after the encoder probe; METEOR_ENCODER_MAX_AXIS
+    // stands in for another encoder's.
+    if (const char *forced = std::getenv("METEOR_ENCODER_MAX_AXIS"); forced && std::atoi(forced) > 0) {
+      display_plan::encoder_max_axis = std::atoi(forced);
+    } else if (const int amf_max = amf::max_encode_axis(); amf_max > 0) {
+      display_plan::encoder_max_axis = std::min(display_plan::max_axis_px, amf_max);
+    }
     const auto plan = platf::dxgi::make_plan(argc > 2 ? argv[2] : "", argc > 3 ? std::atoi(argv[3]) : 0);
     if (!plan) { std::fprintf(stderr,"Unsupported monitor selection\n"); return 1; }
+    std::printf("encoder_max_axis=%d\n",display_plan::encoder_max_axis.load());
     std::printf("frame=%dx%d\n",plan->frame_width,plan->frame_height);
     for (const auto &m : plan->screens)
-      std::printf("screen=%s label=%s enabled=%d primary=%d virtual=%d frame=%d,%d,%d,%d\n",
-        m.id.c_str(),m.label.c_str(),m.enabled,m.is_primary,m.is_virtual,m.frame_x,m.frame_y,m.width,m.height);
+      std::printf("screen=%s label=%s enabled=%d primary=%d virtual=%d frame=%d,%d,%d,%d desktop=%dx%d\n",
+        m.id.c_str(),m.label.c_str(),m.enabled,m.is_primary,m.is_virtual,m.frame_x,m.frame_y,m.frame_w,m.frame_h,m.width,m.height);
     return 0;
   }
 #endif

@@ -6566,7 +6566,7 @@ namespace nvhttp {
           {"enabled", m.enabled},
           {"capturable", true},
           {"is_primary", m.is_primary},
-          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.width, m.height} : nlohmann::json {0, 0, 0, 0}},
+          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.frame_w, m.frame_h} : nlohmann::json {0, 0, 0, 0}},
           {"desktop_rect", desktop},
           {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
         });
@@ -6624,7 +6624,7 @@ namespace nvhttp {
           {"enabled", m.enabled},
           {"capturable", true},
           {"is_primary", m.is_primary},
-          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.width, m.height} : nlohmann::json {0, 0, 0, 0}},
+          {"frame_rect", m.enabled ? nlohmann::json {m.frame_x, m.frame_y, m.frame_w, m.frame_h} : nlohmann::json {0, 0, 0, 0}},
           {"desktop_rect", desktop},
           {"hint", m.is_virtual ? nlohmann::json {{"virtual", true}} : nlohmann::json::object()},
         });

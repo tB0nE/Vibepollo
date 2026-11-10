@@ -1,5 +1,6 @@
 #pragma once
 // Experimental SDR same-adapter desktop composition, enabled explicitly.
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -21,7 +22,7 @@ namespace platf::dxgi {
     }
     std::ofstream out {file, std::ios::trunc};
     out << plan.frame_width << ' ' << plan.frame_height << ' ' << (*primary)->frame_x << ' ' << (*primary)->frame_y
-        << ' ' << (*primary)->width << ' ' << (*primary)->height << '\n';
+        << ' ' << (*primary)->frame_w << ' ' << (*primary)->frame_h << '\n';
   }
 
   // Composes the session's screens into the frame its plan describes. The frame never changes
@@ -33,6 +34,11 @@ namespace platf::dxgi {
       dup_t duplication;
       bool ready = false;
       int frame_x = 0, frame_y = 0, tile_w = 0, tile_h = 0;
+      int out_w = 0, out_h = 0;  // the output's size on the desktop
+      // Shrunk to fit the encoder: drawn whole into its smaller tile, from a copy a shader can read.
+      bool scaled = false;
+      texture2d_t copy;
+      shader_res_t copy_view;
     };
     display_plan::plan_t plan;
     std::vector<source_t> sources;
@@ -40,6 +46,11 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point next_missing_check {};
     texture2d_t composite;
     texture2d_t cursor_surface;
+    render_target_t composite_target;
+    vs_t scale_vs;
+    ps_t scale_ps;
+    sampler_state_t scale_sampler;
+    buf_t scale_rotation;
   public:
     int init(const ::video::config_t &config, const std::string &name, const std::optional<LUID> &luid) {
       if (display_base_t::init(config, name, false, luid)) return -1;
@@ -73,10 +84,22 @@ namespace platf::dxgi {
           const auto r = source.desc.DesktopCoordinates;
           source.frame_x = screen.frame_x;
           source.frame_y = screen.frame_y;
-          source.tile_w = std::min<int>(screen.width, r.right - r.left);
-          source.tile_h = std::min<int>(screen.height, r.bottom - r.top);
-          // Input lands on the output's desktop position, read now, for the tile it fills.
-          frame_tiles.push_back({screen.frame_x, screen.frame_y, (int) r.left, (int) r.top, source.tile_w, source.tile_h});
+          source.out_w = r.right - r.left;
+          source.out_h = r.bottom - r.top;
+          const int frame_w = screen.frame_w > 0 ? screen.frame_w : screen.width;
+          const int frame_h = screen.frame_h > 0 ? screen.frame_h : screen.height;
+          source.scaled = frame_w < screen.width || frame_h < screen.height;
+          if (source.scaled) {
+            source.tile_w = frame_w;
+            source.tile_h = frame_h;
+          } else {
+            source.tile_w = std::min<int>(frame_w, source.out_w);
+            source.tile_h = std::min<int>(frame_h, source.out_h);
+          }
+          // Input lands on the output's desktop position, read now, for the tile it fills; a
+          // scaled tile spreads across the whole output.
+          frame_tiles.push_back({screen.frame_x, screen.frame_y, (int) r.left, (int) r.top, source.tile_w, source.tile_h,
+                                 source.scaled ? source.out_w : 0, source.scaled ? source.out_h : 0});
           sources.push_back(std::move(source));
           break;
         }
@@ -96,9 +119,9 @@ namespace platf::dxgi {
       if (FAILED(device->CreateTexture2D(&desc,nullptr,&composite))) return -1;
       desc.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
       if (FAILED(device->CreateTexture2D(&desc,nullptr,&cursor_surface))) return -1;
-      render_target_t target;
-      if (FAILED(device->CreateRenderTargetView(composite.get(),nullptr,&target))) return -1;
-      const float black[4] = {0,0,0,1}; device_ctx->ClearRenderTargetView(target.get(),black);
+      if (FAILED(device->CreateRenderTargetView(composite.get(),nullptr,&composite_target))) return -1;
+      const float black[4] = {0,0,0,1}; device_ctx->ClearRenderTargetView(composite_target.get(),black);
+      if (std::any_of(sources.begin(), sources.end(), [](const auto &s) { return s.scaled; }) && init_scaling()) return -1;
       next_missing_check = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
       BOOST_LOG(info) << "Multi-output capture: " << sources.size() << " of " << plan.enabled().size()
                       << " screens, frame " << width << 'x' << height;
@@ -151,9 +174,13 @@ namespace platf::dxgi {
         D3D11_TEXTURE2D_DESC desc; image->GetDesc(&desc);
         const auto r = source.desc.DesktopCoordinates;
         if (desc.Format != capture_format || desc.Width != (UINT)(r.right-r.left) || desc.Height != (UINT)(r.bottom-r.top)) return capture_e::reinit;
-        // A screen larger than its planned tile is cropped to it rather than spilling into the next.
-        const D3D11_BOX box {0, 0, 0, (UINT) source.tile_w, (UINT) source.tile_h, 1};
-        device_ctx->CopySubresourceRegion(composite.get(),0,source.frame_x,source.frame_y,0,image.get(),0,&box);
+        if (source.scaled) {
+          if (draw_scaled(source, image.get())) return capture_e::error;
+        } else {
+          // A screen larger than its planned tile is cropped to it rather than spilling into the next.
+          const D3D11_BOX box {0, 0, 0, (UINT) source.tile_w, (UINT) source.tile_h, 1};
+          device_ctx->CopySubresourceRegion(composite.get(),0,source.frame_x,source.frame_y,0,image.get(),0,&box);
+        }
         source.ready = true; changed = true;
       }
       if (sources.empty()) {
@@ -184,12 +211,29 @@ namespace platf::dxgi {
         // it is left out.
         for (const auto &source : sources) {
           const auto r = source.desc.DesktopCoordinates;
-          if (cursor.ptScreenPos.x < r.left || cursor.ptScreenPos.x >= r.left + source.tile_w ||
-              cursor.ptScreenPos.y < r.top || cursor.ptScreenPos.y >= r.top + source.tile_h) continue;
+          // The part of the output its tile shows: all of it when scaled, else what fits.
+          const int shown_w = source.scaled ? source.out_w : source.tile_w;
+          const int shown_h = source.scaled ? source.out_h : source.tile_h;
+          if (cursor.ptScreenPos.x < r.left || cursor.ptScreenPos.x >= r.left + shown_w ||
+              cursor.ptScreenPos.y < r.top || cursor.ptScreenPos.y >= r.top + shown_h) continue;
           ICONINFO icon {};
           if (GetIconInfo(cursor.hCursor,&icon)) {
-            DrawIconEx(dc,source.frame_x + cursor.ptScreenPos.x - r.left - icon.xHotspot,
-              source.frame_y + cursor.ptScreenPos.y - r.top - icon.yHotspot,cursor.hCursor,0,0,0,nullptr,DI_NORMAL);
+            // In a scaled tile the cursor shrinks with the screen around it.
+            const double sx = (double) source.tile_w / shown_w, sy = (double) source.tile_h / shown_h;
+            int cursor_w = 0, cursor_h = 0;
+            if (source.scaled) {
+              BITMAP bm {};
+              if (icon.hbmColor && GetObject(icon.hbmColor, sizeof(bm), &bm)) {
+                cursor_w = bm.bmWidth; cursor_h = bm.bmHeight;
+              } else if (icon.hbmMask && GetObject(icon.hbmMask, sizeof(bm), &bm)) {
+                cursor_w = bm.bmWidth; cursor_h = bm.bmHeight / 2;  // AND and XOR masks stacked
+              }
+              cursor_w = std::max(1, (int) std::lround(cursor_w * sx));
+              cursor_h = std::max(1, (int) std::lround(cursor_h * sy));
+            }
+            DrawIconEx(dc,source.frame_x + (int) std::lround((cursor.ptScreenPos.x - r.left - (LONG) icon.xHotspot) * sx),
+              source.frame_y + (int) std::lround((cursor.ptScreenPos.y - r.top - (LONG) icon.yHotspot) * sy),
+              cursor.hCursor,cursor_w,cursor_h,0,nullptr,DI_NORMAL);
             if (icon.hbmMask) DeleteObject(icon.hbmMask);
             if (icon.hbmColor) DeleteObject(icon.hbmColor);
           }
@@ -208,6 +252,66 @@ namespace platf::dxgi {
     }
   private:
     bool sent_blank = false;
+
+    int init_scaling() {
+      if (!cursor_vs_hlsl || !cursor_ps_hlsl) {
+        BOOST_LOG(error) << "Multi-output capture: the scaling shaders are missing";
+        return -1;
+      }
+      if (FAILED(device->CreateVertexShader(cursor_vs_hlsl->GetBufferPointer(), cursor_vs_hlsl->GetBufferSize(), nullptr, &scale_vs)) ||
+          FAILED(device->CreatePixelShader(cursor_ps_hlsl->GetBufferPointer(), cursor_ps_hlsl->GetBufferSize(), nullptr, &scale_ps))) {
+        return -1;
+      }
+      D3D11_SAMPLER_DESC sampler {};
+      sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+      sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+      sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
+      sampler.MaxLOD = D3D11_FLOAT32_MAX;
+      if (FAILED(device->CreateSamplerState(&sampler, &scale_sampler))) return -1;
+      int32_t no_rotation[16 / sizeof(int32_t)] {};
+      scale_rotation = make_buffer(device.get(), no_rotation);
+      if (!scale_rotation) return -1;
+      for (auto &source : sources) {
+        if (!source.scaled) continue;
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = source.out_w; desc.Height = source.out_h; desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = capture_format; desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &source.copy)) ||
+            FAILED(device->CreateShaderResourceView(source.copy.get(), nullptr, &source.copy_view))) {
+          return -1;
+        }
+        BOOST_LOG(info) << "Multi-output capture: " << source.out_w << 'x' << source.out_h << " screen scaled to "
+                        << source.tile_w << 'x' << source.tile_h << " to fit the encoder";
+      }
+      return 0;
+    }
+
+    // Draws the whole output, shrunk, into its tile.
+    int draw_scaled(source_t &source, ID3D11Texture2D *image) {
+      device_ctx->CopyResource(source.copy.get(), image);
+      const D3D11_VIEWPORT viewport {(float) source.frame_x, (float) source.frame_y, (float) source.tile_w, (float) source.tile_h, 0.0f, 1.0f};
+      auto *target = composite_target.get();
+      auto *view = source.copy_view.get();
+      auto *sampler = scale_sampler.get();
+      auto *rotation = scale_rotation.get();
+      device_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      device_ctx->IASetInputLayout(nullptr);
+      device_ctx->VSSetShader(scale_vs.get(), nullptr, 0);
+      device_ctx->VSSetConstantBuffers(2, 1, &rotation);
+      device_ctx->PSSetShader(scale_ps.get(), nullptr, 0);
+      device_ctx->PSSetShaderResources(0, 1, &view);
+      device_ctx->PSSetSamplers(0, 1, &sampler);
+      device_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+      device_ctx->OMSetRenderTargets(1, &target, nullptr);
+      device_ctx->RSSetViewports(1, &viewport);
+      device_ctx->Draw(3, 0);
+      // Unbind, so the copies that follow don't find the composite still bound as a target.
+      ID3D11ShaderResourceView *no_view = nullptr;
+      device_ctx->PSSetShaderResources(0, 1, &no_view);
+      device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+      return 0;
+    }
   };
   std::shared_ptr<display_t> create_multi_display(const ::video::config_t &config, const std::string &name, const std::optional<LUID> &luid) {
     auto display = std::make_shared<display_multi_t>();
