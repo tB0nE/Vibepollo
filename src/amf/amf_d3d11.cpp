@@ -10,6 +10,8 @@
 #include <exception>
 #include <thread>
 
+#include <dxgi.h>
+
 #include <AMF/components/ColorSpace.h>
 #include <AMF/components/ComponentCaps.h>
 #include <AMF/components/PreAnalysis.h>
@@ -2620,6 +2622,77 @@ namespace amf {
 
     auto enc = std::make_unique<amf_d3d11>(d3d_device);
     return enc;
+  }
+
+  int
+  max_encode_axis() {
+    HMODULE dll = LoadLibraryA(AMF_DLL_NAMEA);
+    if (!dll) {
+      return 0;
+    }
+    int result = 0;
+    {
+      auto amf_init = reinterpret_cast<AMFInit_Fn>(GetProcAddress(dll, AMF_INIT_FUNCTION_NAME));
+      ::amf::AMFFactory *factory = nullptr;
+      Microsoft::WRL::ComPtr<IDXGIFactory1> dxgi;
+      Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+      if (amf_init && amf_init(AMF_FULL_VERSION, &factory) == AMF_OK && factory &&
+          SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&dxgi)))) {
+        for (UINT i = 0; dxgi->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+          DXGI_ADAPTER_DESC1 desc {};
+          if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == 0x1002) {
+            break;
+          }
+          adapter.Reset();
+        }
+      }
+      Microsoft::WRL::ComPtr<ID3D11Device> device;
+      if (adapter) {
+        D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr);
+      }
+      ::amf::AMFContextPtr context;
+      if (device && factory->CreateContext(&context) == AMF_OK && context &&
+          context->InitDX11(device.Get(), AMF_DX11_1) == AMF_OK) {
+        const wchar_t *const codecs[] = {AMFVideoEncoder_HEVC, AMFVideoEncoderVCE_AVC};
+        const char *const codec_names[] = {"HEVC", "H.264"};
+        for (int c = 0; c < 2; ++c) {
+          const wchar_t *codec = codecs[c];
+          ::amf::AMFComponentPtr encoder;
+          ::amf::AMFCapsPtr caps;
+          if (factory->CreateComponent(context, codec, &encoder) != AMF_OK || !encoder ||
+              encoder->GetCaps(&caps) != AMF_OK || !caps) {
+            continue;
+          }
+          // The input surface and the encoded picture each have a range; the smaller wins.
+          amf_int32 max_w = 0, max_h = 0;
+          for (int side = 0; side < 2; ++side) {
+            ::amf::AMFIOCapsPtr io;
+            if ((side == 0 ? caps->GetInputCaps(&io) : caps->GetOutputCaps(&io)) != AMF_OK || !io) {
+              continue;
+            }
+            amf_int32 min_w = 0, w = 0, min_h = 0, h = 0;
+            io->GetWidthRange(&min_w, &w);
+            io->GetHeightRange(&min_h, &h);
+            if (w > 0) {
+              max_w = max_w > 0 ? std::min(max_w, w) : w;
+            }
+            if (h > 0) {
+              max_h = max_h > 0 ? std::min(max_h, h) : h;
+            }
+          }
+          caps = nullptr;
+          encoder->Terminate();
+          if (max_w > 0 && max_h > 0) {
+            result = std::min(max_w, max_h);
+            BOOST_LOG(info) << "AMF: " << codec_names[c] << " encodes up to " << max_w << 'x' << max_h;
+            break;
+          }
+        }
+        context->Terminate();
+      }
+    }
+    FreeLibrary(dll);
+    return result;
   }
 
 }  // namespace amf

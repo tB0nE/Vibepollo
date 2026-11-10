@@ -236,4 +236,12 @@ namespace amf {
   std::unique_ptr<amf_d3d11>
   create_amf_d3d11(ID3D11Device *d3d_device);
 
+  /**
+   * @brief The largest frame side the AMD encoder takes: the smaller of its widest and
+   *        tallest HEVC output (H.264 when HEVC isn't there), on the first AMD adapter.
+   * @return The limit, or 0 when it can't be read.
+   */
+  int
+  max_encode_axis();
+
 }  // namespace amf
