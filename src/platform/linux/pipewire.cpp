@@ -1151,6 +1151,13 @@ namespace pipewire {
         if (num_modifiers > MAX_DMABUF_MODIFIERS) {
           BOOST_LOG(warning) << "[pipewire] Some DMA-BUF modifiers are being ignored"sv;
         }
+        // Drivers without explicit modifiers (amdgpu before GFX9, e.g. Polaris) list none. Offer the
+        // implicit layout then, as other screen casting clients do: with no modifier offered at all,
+        // the compositor negotiates memory buffers and every frame takes a CPU copy.
+        if (num_modifiers <= 0) {
+          mods[0] = DRM_FORMAT_MOD_INVALID;
+          num_modifiers = 1;
+        }
 
         dmabuf_infos[n_dmabuf_infos].format = fmt.pw_format;
         dmabuf_infos[n_dmabuf_infos].n_modifiers = MIN(num_modifiers, MAX_DMABUF_MODIFIERS);
@@ -1188,6 +1195,7 @@ namespace pipewire {
       if (eglQueryDmaBufFormatsEXT && eglQueryDmaBufModifiersEXT) {
         query_dmabuf_formats(egl_display.get());
       }
+      BOOST_LOG(debug) << "[pipewire] DMA-BUF formats offered: "sv << n_dmabuf_infos;
 
       return 0;
     }
