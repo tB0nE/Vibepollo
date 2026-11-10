@@ -15,6 +15,7 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -34,8 +35,17 @@ namespace pipewire_multi {
     std::string label;
     uint32_t node = PW_ID_ANY;
     uint64_t serial = SPA_ID_INVALID;
-    int frame_x = 0, frame_y = 0, width = 0, height = 0;
+    int frame_x = 0, frame_y = 0, width = 0, height = 0;  ///< width x height: the screen's own size.
+    int frame_w = 0, frame_h = 0;  ///< Its tile's size; smaller than width x height when the plan is scaled. 0: the same.
     int desktop_x = 0, desktop_y = 0;
+
+    int tile_w() const {
+      return frame_w > 0 ? frame_w : width;
+    }
+
+    int tile_h() const {
+      return frame_h > 0 ? frame_h : height;
+    }
     /// Ask for exactly this maximum rate (see add_framerate_parameters()); 0 for any.
     int max_framerate = 0;
     /// The session's primary screen: Meteor's host depth crops to it (see publish_primary_region()).
@@ -61,8 +71,8 @@ namespace pipewire_multi {
       return;
     }
     std::ofstream out {path, std::ios::trunc};
-    out << frame_w << ' ' << frame_h << ' ' << primary->frame_x << ' ' << primary->frame_y << ' ' << primary->width << ' '
-        << primary->height << '\n';
+    out << frame_w << ' ' << frame_h << ' ' << primary->frame_x << ' ' << primary->frame_y << ' ' << primary->tile_w() << ' '
+        << primary->tile_h() << '\n';
   }
 
   /// One screen's stream. The packer owns input geometry, so this only negotiates and hands out frames.
@@ -179,7 +189,7 @@ namespace pipewire_multi {
       }
       frame_tiles.clear();
       for (const auto &s : sources_in) {
-        frame_tiles.push_back({s.frame_x, s.frame_y, s.desktop_x - min_x, s.desktop_y - min_y, s.width, s.height});
+        frame_tiles.push_back({s.frame_x, s.frame_y, s.desktop_x - min_x, s.desktop_y - min_y, s.tile_w(), s.tile_h(), s.width, s.height});
       }
       env_width = env_logical_width = max_x - min_x;
       env_height = env_logical_height = max_y - min_y;
@@ -194,7 +204,7 @@ namespace pipewire_multi {
           return -1;
         }
         BOOST_LOG(info) << "[pipewire-multi] Screen "sv << s.label << ' ' << source->width << 'x' << source->height << " into "sv
-                        << s.width << 'x' << s.height << " at "sv << s.frame_x << ',' << s.frame_y;
+                        << s.tile_w() << 'x' << s.tile_h() << " at "sv << s.frame_x << ',' << s.frame_y;
         sources.push_back(std::move(source));
       }
       if (sources.empty()) {
@@ -396,8 +406,8 @@ namespace pipewire_multi {
         const auto &src = static_cast<egl::img_descriptor_t *>(s->img.get())->sd;
         const int sw = src.width > 0 ? src.width : s->width, sh = src.height > 0 ? src.height : s->height;
         const auto &t = s->source;
-        gl::ctx.BlitFramebuffer(0, 0, sw, sh, t.frame_x, t.frame_y, t.frame_x + t.width, t.frame_y + t.height,
-                                GL_COLOR_BUFFER_BIT, sw == t.width && sh == t.height ? GL_NEAREST : GL_LINEAR);
+        gl::ctx.BlitFramebuffer(0, 0, sw, sh, t.frame_x, t.frame_y, t.frame_x + t.tile_w(), t.frame_y + t.tile_h(),
+                                GL_COLOR_BUFFER_BIT, sw == t.tile_w() && sh == t.tile_h() ? GL_NEAREST : GL_LINEAR);
       }
       gl::ctx.BindFramebuffer(GL_FRAMEBUFFER, 0);
       // The encoder samples this buffer from its own context.
@@ -424,10 +434,14 @@ namespace pipewire_multi {
         img->data = img->buffer.data();
         img->src_w = frame->src_w;
         img->src_h = frame->src_h;
-        img->width = frame->width;
-        img->height = frame->height;
-        img->x = frame->x + s->source.frame_x;
-        img->y = frame->y + s->source.frame_y;
+        // Scaled with its tile when the plan is.
+        const auto &t = s->source;
+        const double sx = t.width > 0 ? (double) t.tile_w() / t.width : 1.0;
+        const double sy = t.height > 0 ? (double) t.tile_h() / t.height : 1.0;
+        img->width = std::max(1, (int) std::lround(frame->width * sx));
+        img->height = std::max(1, (int) std::lround(frame->height * sy));
+        img->x = (int) std::lround(frame->x * sx) + t.frame_x;
+        img->y = (int) std::lround(frame->y * sy) + t.frame_y;
         img->serial = frame->serial;
         img->cursor_premultiplied = frame->cursor_premultiplied;
         break;

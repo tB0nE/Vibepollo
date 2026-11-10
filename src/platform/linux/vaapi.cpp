@@ -653,6 +653,47 @@ namespace va {
     return make_avcodec_encode_device(width, height, std::move(file), offset_x, offset_y, vram);
   }
 
+  /// The smaller of the driver's largest encode width and height for the profile; 0 if unknown.
+  static int max_axis_for(display_t::pointer display, VAProfile profile) {
+    std::vector<VAEntrypoint> entrypoints(vaMaxNumEntrypoints(display));
+    int count = 0;
+    if (vaQueryConfigEntrypoints(display, profile, entrypoints.data(), &count) != VA_STATUS_SUCCESS) {
+      return 0;
+    }
+    entrypoints.resize(count);
+    int best = 0;
+    for (auto entrypoint : entrypoints) {
+      if (entrypoint != VAEntrypointEncSlice && entrypoint != VAEntrypointEncSliceLP) {
+        continue;
+      }
+      VAConfigAttrib attrs[2] = {{VAConfigAttribMaxPictureWidth}, {VAConfigAttribMaxPictureHeight}};
+      if (vaGetConfigAttributes(display, profile, entrypoint, attrs, 2) != VA_STATUS_SUCCESS ||
+          attrs[0].value == VA_ATTRIB_NOT_SUPPORTED || attrs[1].value == VA_ATTRIB_NOT_SUPPORTED) {
+        continue;
+      }
+      best = std::max(best, static_cast<int>(std::min(attrs[0].value, attrs[1].value)));
+    }
+    return best;
+  }
+
+  int max_encode_axis() {
+    const auto render_device = platf::resolve_render_device();
+    file_t file = ::open(render_device.c_str(), O_RDWR);  // NOSONAR(cpp:S1874) - `_sopen_s` not available
+    if (file.el < 0) {
+      return 0;
+    }
+    va::display_t display {vaGetDisplayDRM(file.el)};
+    if (!display) {
+      return 0;
+    }
+    int major, minor;
+    if (vaInitialize(display.get(), &major, &minor) != VA_STATUS_SUCCESS) {
+      return 0;
+    }
+    const int hevc = max_axis_for(display.get(), VAProfileHEVCMain);
+    return hevc > 0 ? hevc : max_axis_for(display.get(), VAProfileH264Main);
+  }
+
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, bool vram) {
     return make_avcodec_encode_device(width, height, 0, 0, vram);
   }

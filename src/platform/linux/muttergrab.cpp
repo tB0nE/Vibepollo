@@ -450,6 +450,8 @@ namespace mutter {
         source.frame_y = screen->frame_y;
         source.width = screen->width;
         source.height = screen->height;
+        source.frame_w = screen->frame_w;
+        source.frame_h = screen->frame_h;
         source.is_primary = screen->is_primary;
         for (const auto &m : state->monitors) {
           if (m.connector == connector) {
@@ -752,8 +754,8 @@ namespace platf {
         if (screen.enabled) {
           entry.frame_x = screen.frame_x;
           entry.frame_y = screen.frame_y;
-          entry.frame_w = screen.width;
-          entry.frame_h = screen.height;
+          entry.frame_w = screen.frame_w;
+          entry.frame_h = screen.frame_h;
         }
         entry.desktop_w = screen.width;
         entry.desktop_h = screen.height;

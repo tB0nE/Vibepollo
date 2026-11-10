@@ -38,6 +38,7 @@ extern "C" {
 #include "cbs.h"
 #include "config.h"
 #include "display_device.h"
+#include "display_plan.h"
 #include "amf/amf_encoder.h"
 #include "amf/amf_lifecycle.h"
 #include "globals.h"
@@ -55,6 +56,9 @@ extern "C" {
 
 #if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
   #include "platform/linux/cuda.h"
+#endif
+#if defined(__linux__) && defined(SUNSHINE_BUILD_VAAPI)
+  #include "platform/linux/vaapi.h"
 #endif
 
 #ifdef _WIN32
@@ -7515,6 +7519,21 @@ namespace video {
       av1_hdr_supported,
       successful_capabilities
     );
+    // Plans pack into what this encoder can encode (see display_plan::encoder_max_axis).
+    {
+      int max_axis = display_plan::max_axis_px;
+#ifdef SUNSHINE_BUILD_VAAPI
+      if (new_encoder == &vaapi) {
+        if (const int va_max = va::max_encode_axis(); va_max > 0) {
+          max_axis = std::min(max_axis, va_max);
+        }
+      }
+#endif
+      if (max_axis != display_plan::encoder_max_axis.load()) {
+        BOOST_LOG(info) << "Largest frame the encoder takes: "sv << max_axis << " per side; larger screen layouts are scaled to fit"sv;
+      }
+      display_plan::encoder_max_axis = max_axis;
+    }
     // Publish the new encoder only after the probe has fully succeeded,
     // so concurrent capture threads never observe a null chosen_encoder.
     chosen_encoder = new_encoder;

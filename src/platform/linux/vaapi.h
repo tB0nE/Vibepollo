@@ -26,4 +26,10 @@ namespace va {
 
   // Ensure the render device pointed to by fd is capable of encoding h264 with the hevc_mode configured
   bool validate(int fd);
+
+  /**
+   * The largest side the render device encodes (HEVC when it encodes HEVC, else H.264), from the
+   * driver's VAConfigAttribMaxPictureWidth/Height; 0 when it can't tell.
+   */
+  int max_encode_axis();
 }  // namespace va
