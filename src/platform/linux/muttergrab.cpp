@@ -463,7 +463,19 @@ namespace mutter {
         sessions.push_back(std::move(session));
       }
       BOOST_LOG(info) << "[mutter] Packing "sv << sources.size() << " screens into "sv << plan.frame_width << 'x' << plan.frame_height;
-      return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config);
+      // Mutter spreads the absolute pointer across every monitor, streamed or not.
+      pipewire_multi::desktop_bounds_t desktop;
+      if (!state->monitors.empty()) {
+        int min_x = INT_MAX, min_y = INT_MAX, max_x = INT_MIN, max_y = INT_MIN;
+        for (const auto &m : state->monitors) {
+          min_x = std::min(min_x, m.x);
+          min_y = std::min(min_y, m.y);
+          max_x = std::max(max_x, m.x + m.width);
+          max_y = std::max(max_y, m.y + m.height);
+        }
+        desktop = {min_x, min_y, max_x - min_x, max_y - min_y};
+      }
+      return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config, desktop);
     }
 
   private:

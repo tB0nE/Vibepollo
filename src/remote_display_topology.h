@@ -1,5 +1,7 @@
 #pragma once
 
+#include "virtual_display_capacity.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -13,7 +15,8 @@
 namespace remote_display_topology {
 
   inline constexpr unsigned int layout_version = 1;
-  inline constexpr std::size_t max_client_identities = 4;
+  inline constexpr std::size_t default_client_identities = virtual_display_capacity::default_clients;
+  inline constexpr std::size_t max_client_identities = virtual_display_capacity::max_clients;
 
   enum class lifecycle_e { desired, leased, applying, ready, retryable, released };
 
@@ -53,11 +56,26 @@ namespace remote_display_topology {
     // Implementations may safely downgrade requested state such as HDR.
     std::function<void(const std::string &client_uuid, mode_t &mode)> resolve_mode;
     std::function<bool(const std::vector<node_t> &composed)> apply_composed_topology;
+    // Read the exact active shared output's actual geometry, without changing it.
+    std::function<std::optional<mode_t>(const std::string &client_uuid)> observe_shared_mode;
+    // Some platforms cannot apply or verify the requested color state until
+    // the newly created output is active in the composed topology. Resolve
+    // the effective state for this owner before publishing capture readiness.
+    // `allow_mutation` is false while a normal role owns this same output.
+    std::function<bool(const std::string &client_uuid, mode_t &mode, bool allow_mutation)> finalize_mode;
     // The output is accepted only after this exact client identity has both the
     // requested mode and a capture-enumerated DXGI name.  Passing the mode here
     // prevents a callback from treating a GUID/device-id lookup as readiness.
     std::function<std::optional<std::string>(const std::string &client_uuid, const mode_t &mode)> exact_target_has_current_mode_and_dxgi;
     std::function<bool(const std::string &client_uuid)> remove_owned_display;
+    // Total supported client identities, including retained normal/monitor owners.
+    // Linux reports only provisioned managed outputs, never a desired pool size.
+    std::function<std::size_t()> client_identity_capacity;
+    // Optional terminal monitor removal. Platforms supplying this callback
+    // remove the caller's output even when the remaining topology cannot apply.
+    // A false result retains ownership for retry; shared normal-game outputs
+    // and captures still prevent removal.
+    std::function<bool(const std::string &client_uuid)> terminate_owned_display;
   };
 
   struct activation_result_t {
@@ -81,30 +99,55 @@ namespace remote_display_topology {
     std::uint64_t token = 0;
   };
 
+  struct saved_stream_layout_t {
+    std::optional<node_t> position;
+    bool primary_requested = false;
+  };
+
   // Validates the persisted wire contract without mutating coordinator state.
   bool layout_schema_valid(const nlohmann::json &layout, std::string &error);
   nlohmann::json normalize_layout(const nlohmann::json &layout);
+  // Remove a deleted client's placement and detach direct dependent anchors.
+  nlohmann::json remove_client_from_layout(const nlohmann::json &layout, const std::string &client_uuid);
   bool validate_layout(const nlohmann::json &layout, const std::vector<std::string> &known_clients, const std::vector<std::string> &known_physical_ids, std::string &error);
 
   class coordinator_t {
   public:
     void set_runtime_callbacks(runtime_callbacks_t callbacks);
     void set_layout(nlohmann::json layout);
+    // Resolve only this normal stream's saved placement against live anchors.
+    // Missing placement/anchor preserves Windows' current arrangement, and
+    // never recomposes or moves a peer owned by another session. Detached
+    // automatic fallback may request primary without overriding a position.
+    saved_stream_layout_t saved_stream_placement(const node_t &target, const std::vector<node_t> &active_nodes) const;
     void set_physical_baseline(std::vector<node_t> nodes);
+    // Inventory reads must not replace a baseline while managed displays own it.
+    void refresh_idle_physical_baseline(std::vector<node_t> nodes);
     std::vector<std::string> physical_node_ids() const;
     // Managed ownership is independent of transport lifetime. A retryable or
     // transport-less Remote Monitor remains protected until an explicit owner
     // release, and a normal game may share the same stable client identity.
     std::size_t managed_client_identity_count() const;
+    // Drained normal roles awaiting a failed restore are recovery state, not
+    // live owners. Paused games, captures and retained monitors still own it.
+    bool has_live_managed_client_identity() const;
     bool normal_game_release_pending() const;
     std::vector<std::string> managed_client_identity_ids() const;
     std::vector<std::string> protected_remote_monitor_client_ids() const;
+    // Recovery belongs to live capture. At the final capture boundary, return
+    // only drained normal-game identities that have no retained monitor role.
+    std::vector<std::string> idle_normal_game_recovery_client_ids(bool capture_runtime_owned) const;
     bool generic_virtual_display_cleanup_allowed() const;
+    // Physical REVERT may retain a paused normal-game output, but cannot
+    // disturb a Remote Monitor or an output still referenced by capture.
+    // The caller separately excludes active/pending/tearing-down transports
+    // while holding the stream lifecycle gate. This grants no removal rights.
+    bool physical_display_restore_allowed() const;
     void set_plaintext_rtsp_warning_provider(std::function<std::string(const std::string &)> provider);
     monitor_runtime_state_t activate_or_resume(const std::string &client_uuid, const std::string &label, mode_t mode, uint64_t generation);
     monitor_runtime_state_t snapshot(const std::string &client_uuid, uint64_t generation) const;
     bool is_ready(const std::string &client_uuid, uint64_t generation) const;
-    void explicit_release(const std::string &client_uuid, uint64_t generation, const std::string &reason);
+    bool explicit_release(const std::string &client_uuid, uint64_t generation, const std::string &reason);
     void transport_lost(const std::string &client_uuid, uint64_t generation);
     activation_result_t activate_remote_monitor(const std::string &client_uuid, const std::string &label, mode_t mode);
     activation_result_t resume_remote_monitor(const std::string &client_uuid);
@@ -120,11 +163,21 @@ namespace remote_display_topology {
     std::shared_ptr<void> retain_normal_game_capture(const std::string &client_uuid, std::uint64_t token);
     void release_drained_normal_game_identities();
     void release_all_normal_game_identities();
+    // Caller holds the stream lifecycle gate. A desktop launch without an app
+    // ends only after every active, pending and tearing-down transport drains.
+    void release_idle_normal_game_identities(bool app_running, bool capture_runtime_owned);
+    // Call only after guarded physical restoration succeeds, under the stream
+    // lifecycle gate and outside the platform display lock. No callbacks run;
+    // incomplete cleanup remains pending until that success is established.
+    void complete_restored_normal_game_cleanup();
     void note_lease_lost(const std::string &client_uuid);
     void disconnect_monitor(const std::string &client_uuid);
     void unpair_client(const std::string &client_uuid);
     /** Drop runtime state, optionally preserving every platform display untouched. */
     void shutdown(bool preserve_owned_displays = false);
+    // Terminal callers must distinguish zero role owners from a failed,
+    // still-pending shutdown topology transaction (including an empty map).
+    bool shutdown_complete() const;
     nlohmann::json snapshot(const std::vector<nlohmann::json> &paired_clients) const;
 
   private:
@@ -141,7 +194,15 @@ namespace remote_display_topology {
       bool normal_release_pending = false;
       std::unordered_map<std::uint64_t, std::size_t> normal_capture_references;
       bool remote_monitor = false;
+      bool monitor_release_pending = false;
+      std::string monitor_release_reason;
       bool lease_held = false;
+      // A shared capture prevented this monitor from configuring its requested
+      // mode. Reconfigure after that capture drains, without dropping ownership.
+      bool deferred_monitor_reconfiguration = false;
+      // No topology may be composed from this requested mode while a shared
+      // normal owner has not confirmed it on the exact target.
+      bool shared_mode_unverified = false;
       uint64_t generation = 0;
       // Stable first-ownership order keeps existing displays in place when a
       // new owner has no saved layout. UUID ordering must not reshuffle the
@@ -152,14 +213,19 @@ namespace remote_display_topology {
       std::string warning;
     };
 
+    std::size_t client_identity_capacity_locked() const;
     activation_result_t activate_locked(const std::string &client_uuid, client_state_t &state);
     struct capture_reference_t;
+    bool display_mutation_deferred_locked() const;
+    void finalize_shutdown_locked();
     void release_normal_game_identity_locked(const std::string &client_uuid, client_state_t &state);
     void release_locked(const std::string &client_uuid, client_state_t &state, const std::string &reason);
     static mode_t desired_mode(const client_state_t &state);
     void resolve_effective_mode_locked(const std::string &client_uuid, client_state_t &state);
+    bool refresh_unverified_shared_geometry_locked(const std::string &except = {});
     std::vector<node_t> compose_locked(std::vector<std::string> &warnings) const;
     static mode_t effective_mode(const node_t &node);
+    static void place_relative(node_t &node, const node_t &anchor, const nlohmann::json &placement);
     static int layout_width(const node_t &node);
     static int layout_height(const node_t &node);
     mutable std::mutex mutex_;
@@ -168,6 +234,12 @@ namespace remote_display_topology {
     nlohmann::json layout_ { {"version", layout_version}, {"placements", nlohmann::json::object()} };
     std::vector<node_t> physical_baseline_;
     std::unordered_map<std::string, client_state_t> clients_;
+    std::unordered_map<std::string, std::uint64_t> observed_monitor_generations_;
+    std::unordered_map<std::string, std::uint64_t> released_monitor_generations_;
+    // A removed monitor no longer owns an output, but its failed restore still
+    // needs the saved physical baseline until a later shutdown retry succeeds.
+    bool physical_restore_pending_ = false;
+    bool shutdown_pending_ = false;
     std::uint64_t next_normal_game_token_ = 0;
     std::uint64_t next_placement_order_ = 0;
   };
