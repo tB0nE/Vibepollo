@@ -1688,6 +1688,7 @@ namespace platf {
 
   void kwin_cancel_virtual_outputs_release() {
     kwin::virtual_outputs_t::get().cancel_scheduled_release();
+  }
 
   std::vector<std::string> kwin_display_names_for_restore(
     std::chrono::steady_clock::time_point deadline,
