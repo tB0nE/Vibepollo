@@ -1283,6 +1283,27 @@ namespace kwin {
    * Several screens, each its own KWin stream, packed into the plan's frame. KWin streams one
    * output at that output's rate, so any set of monitors and virtual monitors keeps full rate.
    */
+  /// Every output's bounding box: where KWin spreads the absolute pointer.
+  pipewire_multi::desktop_bounds_t desktop_bounds(const std::vector<platf::output_descriptor_t> &outputs) {
+    if (outputs.empty()) {
+      return {};
+    }
+    int min_x = INT_MAX, min_y = INT_MAX, max_x = INT_MIN, max_y = INT_MIN;
+    for (const auto &out : outputs) {
+      if (!out.capturable || out.width <= 0 || out.height <= 0) {
+        continue;  // Connected but switched off: not part of the desktop.
+      }
+      min_x = std::min(min_x, out.x);
+      min_y = std::min(min_y, out.y);
+      max_x = std::max(max_x, out.x + out.width);
+      max_y = std::max(max_y, out.y + out.height);
+    }
+    if (min_x == INT_MAX) {
+      return {};
+    }
+    return {min_x, min_y, max_x - min_x, max_y - min_y};
+  }
+
   class packed_t: public pipewire_multi::multi_display_t {
   public:
     int init(platf::mem_type_e type, const display_plan::plan_t &plan, const ::video::config_t &config) {
@@ -1319,7 +1340,7 @@ namespace kwin {
         casts.push_back(std::move(cast));
       }
       BOOST_LOG(info) << "[kwingrab] Packing "sv << sources.size() << " screens into "sv << plan.frame_width << 'x' << plan.frame_height;
-      return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config);
+      return multi_display_t::init(type, std::move(sources), plan.frame_width, plan.frame_height, config, desktop_bounds(descriptors));
     }
 
   private:

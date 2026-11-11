@@ -30,6 +30,11 @@
 #include <libdrm/drm_fourcc.h>
 
 namespace pipewire_multi {
+  /// The whole desktop's bounding box, every monitor included, in desktop coordinates.
+  struct desktop_bounds_t {
+    int x = 0, y = 0, width = 0, height = 0;
+  };
+
   /// One screen of the frame: where its stream is, where it goes in the frame, where it is on the desktop.
   struct screen_source_t {
     std::string label;
@@ -166,7 +171,14 @@ namespace pipewire_multi {
      * @param sources_in The plan's enabled screens with their stream nodes.
      * @param frame_w, frame_h The plan's frame size.
      */
-    int init(platf::mem_type_e type, std::vector<screen_source_t> sources_in, int frame_w, int frame_h, const ::video::config_t &config) {
+    /**
+     * `desktop` is the bounding box of every monitor on the desktop, streamed or not. The
+     * compositor spreads the absolute pointer across all of it, so input maps through it: with
+     * only the streamed screens' box, a session that leaves a monitor out (virtual monitors
+     * only) put every click on the wrong spot.
+     */
+    int init(platf::mem_type_e type, std::vector<screen_source_t> sources_in, int frame_w, int frame_h, const ::video::config_t &config,
+             const desktop_bounds_t &desktop = {}) {
       publish_primary_region(sources_in, frame_w, frame_h);
       mem_type = type;
       width = frame_w;
@@ -186,6 +198,12 @@ namespace pipewire_multi {
         min_y = std::min(min_y, s.desktop_y);
         max_x = std::max(max_x, s.desktop_x + s.width);
         max_y = std::max(max_y, s.desktop_y + s.height);
+      }
+      if (desktop.width > 0 && desktop.height > 0) {
+        min_x = std::min(min_x, desktop.x);
+        min_y = std::min(min_y, desktop.y);
+        max_x = std::max(max_x, desktop.x + desktop.width);
+        max_y = std::max(max_y, desktop.y + desktop.height);
       }
       frame_tiles.clear();
       for (const auto &s : sources_in) {
