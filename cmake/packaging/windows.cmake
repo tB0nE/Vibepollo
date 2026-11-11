@@ -1,8 +1,11 @@
 # windows specific packaging
 include("${CMAKE_SOURCE_DIR}/cmake/packaging/windows_virtual_display_contract.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/packaging/windows_virtual_gamepad_contract.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/packaging/windows_usbip_contract.cmake")
 
 install(TARGETS sunshine RUNTIME DESTINATION "." COMPONENT application)
+install(FILES "${CMAKE_SOURCE_DIR}/packaging/windows/dualsense_usbip_NOTICES.txt"
+        DESTINATION "licenses" COMPONENT application)
 
 # Hardening: include zlib1.dll (loaded via LoadLibrary() in openssl's libcrypto.a)
 # Check for zlib in Sunshine or Apollo install directories
@@ -20,11 +23,11 @@ if(WEBRTC_RUNTIME_DLL)
     install(FILES "${WEBRTC_RUNTIME_DLL}" DESTINATION "." COMPONENT application)
 endif()
 
-# Optional NVIDIA TrueHDR runtime. Release builders download a pinned runtime
-# bundle before configure; local builders may place these files in this
-# directory before packaging. Only the TrueHDR feature DLL is bundled; VSR is not
-# used.
-option(SUNSHINE_REQUIRE_TRUEHDR_RUNTIME "Fail Windows packaging when the TrueHDR runtime DLLs are missing." OFF)
+# NVIDIA TrueHDR runtime. Installer builds stage the pinned runtime at CPack
+# time so RTX HDR cannot be shipped in a silently disabled state. Force the
+# cache value on so older local build trees do not keep the previous optional
+# default. Only the TrueHDR feature DLL is bundled; VSR is not used.
+set(SUNSHINE_REQUIRE_TRUEHDR_RUNTIME ON CACHE BOOL "Fail Windows packaging when the TrueHDR runtime DLLs are missing." FORCE)
 set(SUNSHINE_TRUEHDR_RUNTIME_DIR "${CMAKE_BINARY_DIR}/truehdr-runtime" CACHE PATH "Directory containing vibeshine_truehdr.dll and the NVIDIA NGX TrueHDR runtime DLL")
 if("${SUNSHINE_TRUEHDR_RUNTIME_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
     set(SUNSHINE_TRUEHDR_RUNTIME_DIR "${CMAKE_BINARY_DIR}/truehdr-runtime" CACHE PATH "Directory containing vibeshine_truehdr.dll and the NVIDIA NGX TrueHDR runtime DLL" FORCE)
@@ -35,18 +38,39 @@ foreach(_truehdr_runtime_name IN LISTS SUNSHINE_VDD_TRUEHDR_FILES)
         "${SUNSHINE_TRUEHDR_RUNTIME_DIR}/${_truehdr_runtime_name}")
 endforeach()
 unset(_truehdr_runtime_name)
+set(SUNSHINE_TRUEHDR_RUNTIME_FILES_INSTALL_CODE "")
+foreach(_truehdr_runtime_file IN LISTS SUNSHINE_TRUEHDR_RUNTIME_FILES)
+    string(APPEND SUNSHINE_TRUEHDR_RUNTIME_FILES_INSTALL_CODE
+        "        \"${_truehdr_runtime_file}\"\n")
+endforeach()
+unset(_truehdr_runtime_file)
 if(SUNSHINE_REQUIRE_TRUEHDR_RUNTIME)
-    foreach(_truehdr_runtime_file IN LISTS SUNSHINE_TRUEHDR_RUNTIME_FILES)
-        if(NOT EXISTS "${_truehdr_runtime_file}")
-            message(FATAL_ERROR "Required TrueHDR runtime file missing: ${_truehdr_runtime_file}")
-        endif()
-        file(SIZE "${_truehdr_runtime_file}" _truehdr_runtime_file_size)
-        if(_truehdr_runtime_file_size EQUAL 0)
-            message(FATAL_ERROR "Required TrueHDR runtime file is empty (0 bytes): ${_truehdr_runtime_file}")
-        endif()
-    endforeach()
-    unset(_truehdr_runtime_file_size)
-    unset(_truehdr_runtime_file)
+    set(_truehdr_stage_code [=[
+execute_process(
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "@CMAKE_SOURCE_DIR@/scripts/download_truehdr_runtime_release.ps1"
+            -Repository "@SUNSHINE_VDD_TRUEHDR_REPOSITORY@"
+            -Tag "@SUNSHINE_VDD_TRUEHDR_RELEASE_TAG@"
+            -OutDir "@SUNSHINE_TRUEHDR_RUNTIME_DIR@"
+    RESULT_VARIABLE _truehdr_stage_result
+)
+if(NOT _truehdr_stage_result EQUAL 0)
+    message(FATAL_ERROR "Failed to stage required TrueHDR runtime files in @SUNSHINE_TRUEHDR_RUNTIME_DIR@")
+endif()
+
+foreach(_truehdr_runtime_file IN ITEMS
+@SUNSHINE_TRUEHDR_RUNTIME_FILES_INSTALL_CODE@)
+    if(NOT EXISTS "${_truehdr_runtime_file}")
+        message(FATAL_ERROR "Required TrueHDR runtime file missing: ${_truehdr_runtime_file}")
+    endif()
+    file(SIZE "${_truehdr_runtime_file}" _truehdr_runtime_file_size)
+    if(_truehdr_runtime_file_size EQUAL 0)
+        message(FATAL_ERROR "Required TrueHDR runtime file is empty (0 bytes): ${_truehdr_runtime_file}")
+    endif()
+endforeach()
+]=])
+    string(CONFIGURE "${_truehdr_stage_code}" _truehdr_stage_code @ONLY)
+    install(CODE "${_truehdr_stage_code}" COMPONENT application)
+    unset(_truehdr_stage_code)
     install(FILES ${SUNSHINE_TRUEHDR_RUNTIME_FILES}
         DESTINATION "."
         COMPONENT application)
@@ -72,11 +96,20 @@ install(TARGETS audio-info RUNTIME DESTINATION "tools" COMPONENT audio)
 # - Playnite launcher helper used for Playnite-managed app launches
 # - WGC capture helper used by the WGC display backend
 # - Display helper used for applying/reverting display settings
+install(TARGETS vibepollo_dualsense_haptics vibepollo_dualsense_audio
+        RUNTIME DESTINATION "tools" LIBRARY DESTINATION "tools" COMPONENT application)
+if(DEFINED _MINHOOK_DLL)
+    install(FILES "${_MINHOOK_DLL}" DESTINATION "tools" COMPONENT application)
+endif()
+
 if (TARGET playnite-launcher)
     install(TARGETS playnite-launcher RUNTIME DESTINATION "tools" COMPONENT application)
 endif()
 if (TARGET sunshine_wgc_capture)
     install(TARGETS sunshine_wgc_capture RUNTIME DESTINATION "tools" COMPONENT application)
+endif()
+if (TARGET sunshine_end_stream_hotkey)
+    install(TARGETS sunshine_end_stream_hotkey RUNTIME DESTINATION "tools" COMPONENT application)
 endif()
 if (TARGET sunshine_display_helper)
     install(TARGETS sunshine_display_helper RUNTIME DESTINATION "tools" COMPONENT application)
@@ -154,6 +187,11 @@ unset(_sunshine_driver_optional_file)
 unset(_sunshine_driver_optional_name)
 
 foreach(_sunshine_driver_file IN LISTS SUNSHINE_VIRTUAL_DISPLAY_PACKAGE_FILES)
+    file(RELATIVE_PATH _sunshine_driver_relative_file
+        "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_SOURCE_DIR}" "${_sunshine_driver_file}")
+    if(_sunshine_driver_relative_file IN_LIST SUNSHINE_VDD_VULKAN_LAYER_GENERATED_FILES)
+        continue()
+    endif()
     if (NOT EXISTS "${_sunshine_driver_file}")
         message(FATAL_ERROR "Required Vibepollo Display Driver artifact missing: ${_sunshine_driver_file}")
     endif()
@@ -166,20 +204,26 @@ unset(_sunshine_driver_file_size)
 unset(_sunshine_driver_file)
 
 if(EXISTS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT}")
-    if(SUNSHINE_DOWNLOAD_LIBVIRTUALDISPLAY_RELEASE)
-        if(NOT EXISTS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}")
-            message(FATAL_ERROR "Required libvirtualdisplay release downloader is missing: ${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}")
-        endif()
-        add_custom_target(download_sunshine_virtual_display_driver_release
-            COMMAND powershell -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass
-                    -File "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}"
-                    -Repository "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_REPOSITORY}"
-                    -Tag "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_RELEASE_TAG}"
-                    -OutDir "${SUNSHINE_EFFECTIVE_LIBVIRTUALDISPLAY_PREBUILT_DIR}"
-            DEPENDS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}"
-            COMMENT "Downloading pinned Vibepollo Display Driver release"
-            VERBATIM)
+    # Verify explicit prebuilt roots too; cache existence alone is not provenance.
+    if(NOT EXISTS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}")
+        message(FATAL_ERROR "Required libvirtualdisplay release downloader is missing: ${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}")
     endif()
+    set(_sunshine_vdd_provenance_args "")
+    if(NOT SUNSHINE_DOWNLOAD_LIBVIRTUALDISPLAY_RELEASE)
+        set(_sunshine_vdd_provenance_args -ValidateOnly)
+    endif()
+    add_custom_target(download_sunshine_virtual_display_driver_release
+        COMMAND powershell -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass
+                -File "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}"
+                -Repository "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_REPOSITORY}"
+                -Tag "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_RELEASE_TAG}"
+                -OutDir "${SUNSHINE_EFFECTIVE_LIBVIRTUALDISPLAY_PREBUILT_DIR}"
+                -LockPath "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_RELEASE_LOCK}"
+                ${_sunshine_vdd_provenance_args}
+        DEPENDS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_DOWNLOAD_SCRIPT}" "${SUNSHINE_VDD_LIBVIRTUALDISPLAY_RELEASE_LOCK}"
+        COMMENT "Verifying reviewed Vibepollo Display Driver producer bytes"
+        VERBATIM)
+    unset(_sunshine_vdd_provenance_args)
 
     add_custom_target(validate_sunshine_virtual_display_driver_assets
         COMMAND powershell -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass
@@ -189,19 +233,17 @@ if(EXISTS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT}")
                 -PrebuiltPackageDir "${SUNSHINE_EFFECTIVE_LIBVIRTUALDISPLAY_PREBUILT_DIR}"
                 -PackageDir "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_SOURCE_DIR}"
         DEPENDS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT}"
-                ${SUNSHINE_VIRTUAL_DISPLAY_PACKAGE_FILES}
         COMMENT "Validating Vibepollo Display Driver package assets"
         VERBATIM)
 
-    if(SUNSHINE_DOWNLOAD_LIBVIRTUALDISPLAY_RELEASE)
-        add_dependencies(validate_sunshine_virtual_display_driver_assets
-            download_sunshine_virtual_display_driver_release)
-    endif()
+    add_dependencies(validate_sunshine_virtual_display_driver_assets
+        download_sunshine_virtual_display_driver_release)
 
     add_custom_target(refresh_sunshine_virtual_display_driver_assets
         COMMAND powershell -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass
                 -File "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT}"
                 -Build
+                -VulkanLayerX86BuildDir "${CMAKE_BINARY_DIR}/vulkan-layer-x86"
                 -LibVirtualDisplayDir "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}"
                 -PrebuiltPackageDir "${SUNSHINE_EFFECTIVE_LIBVIRTUALDISPLAY_PREBUILT_DIR}"
                 -PackageDir "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_SOURCE_DIR}"
@@ -210,10 +252,8 @@ if(EXISTS "${SUNSHINE_VIRTUAL_DISPLAY_DRIVER_REFRESH_SCRIPT}")
         COMMENT "Refreshing Vibepollo Display Driver package assets from the pinned release"
         VERBATIM)
 
-    if(SUNSHINE_DOWNLOAD_LIBVIRTUALDISPLAY_RELEASE)
-        add_dependencies(refresh_sunshine_virtual_display_driver_assets
-            download_sunshine_virtual_display_driver_release)
-    endif()
+    add_dependencies(refresh_sunshine_virtual_display_driver_assets
+        download_sunshine_virtual_display_driver_release)
 
     if(TARGET package_msi AND SUNSHINE_VDD_REFRESH_BEFORE_MSI)
         add_dependencies(package_msi refresh_sunshine_virtual_display_driver_assets)
@@ -311,8 +351,10 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
         unset(_vhf_gamepad_signer)
     endif()
 
-    set(SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_SOURCE_DIR
-        "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/drivers/vhf-gamepad")
+    sunshine_vhf_prepare_package_stage(SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_SOURCE_DIR
+        "${SUNSHINE_ALLOW_LOCAL_VHF_GAMEPAD_TEST_PACKAGE}"
+        "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/drivers/vhf-gamepad"
+        "${CMAKE_BINARY_DIR}")
     set(SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_REFRESH_SCRIPT
         "${CMAKE_SOURCE_DIR}/packaging/windows/virtual_gamepad_driver/refresh_driver_package.ps1")
     set(SUNSHINE_VIRTUAL_GAMEPAD_DRIVER_DOWNLOAD_SCRIPT
@@ -450,6 +492,39 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
     endif()
 endif()
 
+# Optional Windows DualSense composite USB/audio transport. Payload inclusion
+# only makes the unchecked installer option available; PnP installation is
+# explicitly gated by INSTALL_USBIP_TRANSPORT=1 in WiX.
+set(SUNSHINE_USBIP_WIX_BUNDLED 0)
+if(SUNSHINE_BUNDLE_USBIP_TRANSPORT)
+    set(SUNSHINE_USBIP_WIX_BUNDLED 1)
+    set(SUNSHINE_USBIP_PACKAGE_DIR "${CMAKE_BINARY_DIR}/usbip-transport-${SUNSHINE_USBIP_RELEASE_TAG}")
+    set(_usbip_stage_code [=[
+execute_process(
+    COMMAND powershell -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass
+            -File "@CMAKE_SOURCE_DIR@/scripts/download_usbip_transport.ps1"
+            -OutDir "@SUNSHINE_USBIP_PACKAGE_DIR@"
+    RESULT_VARIABLE _usbip_stage_result
+)
+if(NOT _usbip_stage_result EQUAL 0)
+    message(FATAL_ERROR "Failed to stage and verify the original Microsoft-signed USB/IP transport.")
+endif()
+]=])
+    string(CONFIGURE "${_usbip_stage_code}" _usbip_stage_code @ONLY)
+    install(CODE "${_usbip_stage_code}" COMPONENT usbip_transport)
+    unset(_usbip_stage_code)
+    foreach(_usbip_file IN LISTS SUNSHINE_USBIP_REQUIRED_FILES)
+        install(FILES "${SUNSHINE_USBIP_PACKAGE_DIR}/${_usbip_file}"
+                DESTINATION "${SUNSHINE_USBIP_DRIVER_DESTINATION}" COMPONENT usbip_transport)
+    endforeach()
+    unset(_usbip_file)
+    install(FILES
+            "${CMAKE_SOURCE_DIR}/packaging/windows/usbip_transport/install.ps1"
+            "${CMAKE_SOURCE_DIR}/packaging/windows/usbip_transport/package.ps1"
+            "${CMAKE_SOURCE_DIR}/packaging/windows/usbip_transport/LICENSE.txt"
+            DESTINATION "${SUNSHINE_USBIP_DRIVER_DESTINATION}" COMPONENT usbip_transport)
+endif()
+
 # Mandatory scripts
 install(FILES "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/misc/sunshine-setup.ps1"
         DESTINATION "scripts"
@@ -549,6 +624,15 @@ if(SUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER)
     set(CPACK_COMPONENT_VIRTUAL_GAMEPAD_DRIVER_REQUIRED true)
 endif()
 
+if(SUNSHINE_BUNDLE_USBIP_TRANSPORT)
+    set(CPACK_COMPONENT_USBIP_TRANSPORT_DISPLAY_NAME "DualSense USB Audio and Haptics")
+    set(CPACK_COMPONENT_USBIP_TRANSPORT_DESCRIPTION
+        "Optional Microsoft-signed USB/IP transport for waveform haptics with a compatible Moonlight client.")
+    set(CPACK_COMPONENT_USBIP_TRANSPORT_GROUP "Drivers")
+    # Required files in the MSI; driver installation remains an explicit opt-in.
+    set(CPACK_COMPONENT_USBIP_TRANSPORT_REQUIRED true)
+endif()
+
 # audio tool
 set(CPACK_COMPONENT_AUDIO_DISPLAY_NAME "audio-info")
 set(CPACK_COMPONENT_AUDIO_DESCRIPTION "CLI tool providing information about sound devices.")
@@ -566,5 +650,6 @@ set(CPACK_COMPONENT_FIREWALL_GROUP "Scripts")
 
 # gamepad scripts are bundled under assets and not exposed as a separate component
 
-# include specific packaging (WiX only)
+# include generator-specific packaging
 include(${CMAKE_MODULE_PATH}/packaging/windows_wix.cmake)
+include(${CMAKE_MODULE_PATH}/packaging/windows_portable.cmake)

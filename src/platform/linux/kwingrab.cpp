@@ -51,6 +51,7 @@
 #include "src/display_plan.h"
 #include "private_display.h"
 #include "private_display_capture_policy.h"
+#include "wayland_observation.h"
 #include "src/platform/common.h"
 #include "src/video.h"
 
@@ -340,6 +341,20 @@ namespace kwin {
       wl_display_roundtrip(wl_display);
 
       return 0;
+    }
+
+    /** Observe output publication without permission setup or blocking roundtrips. */
+    int init_until(
+      std::chrono::steady_clock::time_point deadline,
+      const std::function<bool()> &allowed
+    ) {
+      wl_display = platf::wayland_observation::connect_until(deadline, allowed);
+      if (!wl_display) return -1;
+      wl_registry = wl_display_get_registry(wl_display);
+      if (!wl_registry) return -1;
+      wl_registry_add_listener(wl_registry, &registry_listener, this);
+      return platf::wayland_observation::roundtrip_until(wl_display, deadline, allowed) &&
+             platf::wayland_observation::roundtrip_until(wl_display, deadline, allowed) ? 0 : -1;
     }
 
     /**
@@ -1353,6 +1368,7 @@ namespace kwin {
         out_pipewire_node = screencast->out_node_id;
         out_pipewire_objectserial = screencast->out_objectserial;
         // Set/update basic stream parameters on display_t
+        this->input_output_name = screencast->out_params->name;
         this->offset_x = screencast->out_params->pos_x;
         this->offset_y = screencast->out_params->pos_y;
         this->width = screencast->out_params->width;
@@ -1469,7 +1485,7 @@ namespace platf {
   std::vector<std::string> kwin_display_names() {
     const bool retain_kms_capability =
       platf::linux_private_display_capture::retain_kms_capability(
-        linux_private_display::kernel_hdr_pool_available()
+        config::video.capture.empty() && linux_private_display::kernel_pool_available()
       );
     if (platf::linux_private_display_capture::use_dummy_compositor_names(
           has_elevated_privileges(false),
@@ -1482,7 +1498,7 @@ namespace platf {
       return display_names;
     }
 
-    // A managed HDR pool retains permitted CAP_SYS_ADMIN for future KMS use.
+    // Automatic managed display capture retains permitted CAP_SYS_ADMIN for future KMS use.
     // Enumerate KWin directly in that case instead of returning dummy names
     // forever merely because the permitted capability remains available.
 
@@ -1672,6 +1688,14 @@ namespace platf {
 
   void kwin_cancel_virtual_outputs_release() {
     kwin::virtual_outputs_t::get().cancel_scheduled_release();
+
+  std::vector<std::string> kwin_display_names_for_restore(
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()> &allowed
+  ) {
+    const auto screencast = std::make_unique<kwin::screencast_t>();
+    if (screencast->init_until(deadline, allowed) < 0) return {};
+    return screencast->get_output_names();
   }
 
   bool kwin_available() {

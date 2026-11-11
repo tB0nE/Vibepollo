@@ -66,6 +66,7 @@ export interface AppForm {
   excludeGlobalStateCmd: boolean;
   configOverrides: Record<string, unknown>;
   elevated: boolean;
+  dualsenseHaptics: boolean;
   autoDetach: boolean;
   waitAll: boolean;
   terminateOnPause: boolean;
@@ -123,6 +124,7 @@ export interface ServerApp {
   'exclude-global-prep-cmd'?: boolean;
   'config-overrides'?: Record<string, unknown>;
   elevated?: boolean;
+  'dualsense-haptics'?: boolean;
   'auto-detach'?: boolean;
   'wait-all'?: boolean;
   'exclude-global-state-cmd'?: boolean;
@@ -142,6 +144,7 @@ export interface ServerApp {
   'prefer-10bit-sdr'?: boolean;
   'playnite-id'?: string | undefined;
   'playnite-managed'?: 'manual' | string | undefined;
+  'playnite-fullscreen'?: boolean | undefined;
   'gen1-framegen-fix'?: boolean;
   'gen2-framegen-fix'?: boolean;
   'dlss-framegen-capture-fix'?: boolean;

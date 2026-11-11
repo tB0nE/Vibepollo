@@ -127,12 +127,28 @@ namespace Playnite.SDK.Models
 namespace Playnite.SDK.Plugins { public class LibraryPlugin { public Guid Id; public string Name; } }
 namespace SunshinePlaynite
 {
+    internal static class WaveformLaunchBridge
+    {
+        public static int Calls;
+        public static bool Result = true;
+        public static string Mapping, Directory;
+        public static bool Steam;
+        public static bool Prepare(string dll, string mapping, string directory, bool steam)
+        {
+            Calls++;
+            Mapping = mapping;
+            Directory = directory;
+            Steam = steam;
+            return Result;
+        }
+    }
     internal sealed class ConnectorLog : IDisposable
     {
         public ConnectorLog(Playnite.SDK.ILogger logger, bool enabled) { }
         public void Info(string message) => Console.WriteLine(message);
         public void Debug(string message) { }
-        public void Warn(string message) => Console.WriteLine(message);
+        public static readonly System.Collections.Concurrent.ConcurrentQueue<string> Warnings = new();
+        public void Warn(string message) { Warnings.Enqueue(message); Console.WriteLine(message); }
         public void SetDebugEnabled(bool enabled) { }
         public void Dispose() { }
     }
@@ -143,7 +159,18 @@ namespace SunshinePlaynite
         public static bool PauseValidation;
         public static string TestSuffix = Guid.NewGuid().ToString("N");
         public static object CreatePipeSecurity() => new();
-        public static NamedPipeServerStream CreateServer(string name, object security) => new(name + TestSuffix, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 65536, 65536);
+        public static volatile bool FailControlCreation;
+        public static volatile bool FailAfterValidation;
+        public static int ControlAttempts;
+        public static NamedPipeServerStream CreateServer(string name, object security)
+        {
+            if (name == "Sunshine.PlayniteExtension")
+            {
+                Interlocked.Increment(ref ControlAttempts);
+                if (FailControlCreation) throw new IOException("All pipe instances are busy");
+            }
+            return new(name + TestSuffix, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 65536, 65536);
+        }
         public static void WaitForConnection(NamedPipeServerStream pipe, CancellationToken token, int timeoutMs = Timeout.Infinite) => pipe.WaitForConnectionAsync(token).GetAwaiter().GetResult();
         public static void WriteHandshake(Stream stream, string name)
         {
@@ -155,6 +182,7 @@ namespace SunshinePlaynite
         public static string ValidateClient(NamedPipeServerStream stream, IDictionary<string, object> hello)
         {
             if (PauseValidation) { Validating.Set(); ContinueValidation.Wait(); }
+            if (FailAfterValidation) { FailAfterValidation = false; FailControlCreation = true; }
             return (string)hello["role"];
         }
     }
