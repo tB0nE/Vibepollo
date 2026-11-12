@@ -54,6 +54,7 @@
 #include "display_helper_integration.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "host_cursor_visibility.h"
 #include "hardware_metrics.h"
 #include "hdr_request_policy.h"
 #include "httpcommon.h"
@@ -7406,6 +7407,43 @@ launch_session->exact_target_hold.reset();
     response->close_connection_after_response = true;
   }
 
+  // Polaris-compatible cursor control used by Nightfall. The paired TLS
+  // certificate must have stream-view permission, as for the display manifest.
+  void getCursorStatus(resp_https_t response, req_https_t request) {
+    if (!has_client_perm(get_verified_cert(request), PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(nlohmann::json {{"cursor_visible", host_cursor_visibility::visible()}}.dump(), headers);
+  }
+
+  void setCursorVisibility(resp_https_t response, req_https_t request) {
+    if (!has_client_perm(get_verified_cert(request), PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    try {
+      char body[4097];
+      request->content.read(body, sizeof(body));
+      const auto size = request->content.gcount();
+      if (size > 4096) throw std::runtime_error("Cursor request too large");
+      const auto value = nlohmann::json::parse(body, body + size);
+      if (!value.contains("visible") || !value["visible"].is_boolean()) {
+        throw std::runtime_error("visible must be a boolean");
+      }
+      const bool visible = value["visible"].get<bool>();
+      host_cursor_visibility::set_visible(visible);
+      response->write(nlohmann::json {{"visible", visible}}.dump(), headers);
+    } catch (const std::exception &e) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request,
+        nlohmann::json {{"error", e.what()}}.dump(), headers);
+    }
+  }
+
   /**
    * @brief GET /polaris/v1/display/manifest: where each monitor is in the captured frame.
    *
@@ -8138,6 +8176,8 @@ launch_session->exact_target_hold.reset();
       );
     };
     https_server.resource["^/api/abr/capabilities$"]["GET"] = getAbrCapabilities;
+    https_server.resource["^/polaris/v1/session/status$"]["GET"] = getCursorStatus;
+    https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = setCursorVisibility;
     https_server.resource["^/polaris/v1/display/manifest$"]["GET"] = getDisplayManifest;
     https_server.resource["^/pyrowave-bandwidth-probe$"]["GET"] = getPyroWaveBandwidthProbe;
     https_server.resource["^/pyrowave-udp-probe$"]["GET"] = [run_blocking_nvhttp](auto resp, auto req) {

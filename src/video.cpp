@@ -43,6 +43,7 @@ extern "C" {
 #include "amf/amf_encoder.h"
 #include "amf/amf_lifecycle.h"
 #include "globals.h"
+#include "host_cursor_visibility.h"
 #include "input.h"
 #include "input_geometry_policy.h"
 #include "logging.h"
@@ -3397,7 +3398,9 @@ namespace video {
       bool artificial_reinit = false;
       const bool event_driven_capture = disp->is_event_driven_capture();
 
+      bool capture_cursor = host_cursor_visibility::visible();
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        capture_cursor = host_cursor_visibility::visible();
 #ifdef _WIN32
         if (frame_captured && img && display_p >= 0 && static_cast<std::size_t>(display_p) < display_names.size()) {
           observe_recovery_capture_frame(display_names[display_p], disp->recovery_capture_instance);
@@ -3466,7 +3469,7 @@ namespace video {
         return true;
       };
 
-      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &capture_cursor);
 
       if (artificial_reinit && status != platf::capture_e::error) {
         BOOST_LOG(debug) << "Capture restart: source=explicit-display-switch";
@@ -6133,7 +6136,9 @@ namespace video {
     const auto bootstrap_image = img;
     auto ec = platf::capture_e::ok;
     while (encode_session_ctx_queue.running()) {
+      bool capture_cursor = host_cursor_visibility::visible();
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        capture_cursor = host_cursor_visibility::visible();
 #ifdef _WIN32
         if (frame_captured && img && display_p >= 0 && static_cast<std::size_t>(display_p) < display_names.size()) {
           observe_recovery_capture_frame(display_names[display_p], disp->recovery_capture_instance);
@@ -6324,7 +6329,7 @@ namespace video {
         return true;
       };
 
-      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &capture_cursor);
       // capture() terminalizes this display's geometry before returning. Make
       // the terminal mapping visible to every active synchronous session before
       // tearing down their encoder state or returning to the caller.
