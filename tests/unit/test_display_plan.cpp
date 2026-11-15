@@ -100,3 +100,50 @@ TEST(DisplayPlan, ScaledTileMapsInputToTheWholeMonitor) {
   EXPECT_FLOAT_EQ(ux, 110);
   EXPECT_FLOAT_EQ(uy, 70);
 }
+
+TEST(DisplayPlan, CustomVirtualModesValidateAndKeepIndependentSizes) {
+  using namespace virtual_display_modes;
+  EXPECT_FALSE(parse("2561x1440", 1));
+  EXPECT_FALSE(parse("8192x8192", 1));
+  EXPECT_FALSE(parse("2560x1440,", 1));
+  EXPECT_FALSE(parse("2560x1440", 2));
+  auto modes = parse("0x0,1920x1080", 2);
+  ASSERT_TRUE(modes);
+  auto result = display_plan::make({{"DP-1",0,0,2560,1440,true}}, {"DP-1"}, 2, false, *modes);
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->screens[1].width,2560);
+  EXPECT_EQ(result->screens[2].width,1920);
+  EXPECT_EQ(result->screens[2].height,1080);
+}
+
+TEST(DisplayPlan, ClientH264BudgetPreservesTwo1440pTiles) {
+  client_packing::budget_t b; b.active=true;b.axis=4032;b.pixels=16257024;b.strict=true;
+  client_packing::scope scope(b);
+  auto p=display_plan::make(one_1440p(),{},1,false);
+  ASSERT_TRUE(p);EXPECT_EQ(p->frame_width,2560);EXPECT_EQ(p->frame_height,2880);
+  EXPECT_TRUE(client_packing::request.fits);EXPECT_TRUE(p->profiled);
+  EXPECT_FALSE(display_plan::make(one_1440p(),{},2,false));
+}
+TEST(DisplayPlan, ClientBudgetScopeAndEncoderLimit) {
+  client_packing::budget_t b;b.active=true;b.axis=8192;b.pixels=21233664;b.strict=true;
+  {client_packing::scope scope(b);
+    EXPECT_TRUE(display_plan::make(one_1440p(),{},2,false));
+    encoder_limit limit{4096};
+    EXPECT_FALSE(display_plan::make(one_1440p(),{},2,false));
+  }
+  EXPECT_FALSE(client_packing::request.active);
+}
+TEST(DisplayPlan, PhysicalProfilePreservesDesktopAndCustomVirtualMode) {
+  client_packing::budget_t b;b.active=true;b.axis=8192;b.pixels=21233664;
+  b.physical_w=2560;b.physical_h=1440;b.physical_modes["m0"]={1920,1080};
+  client_packing::scope scope(b);
+  auto p=display_plan::make({{"DP-1",0,0,3840,2160,true}}, {},1,false,{{2560,1440}});
+  ASSERT_TRUE(p);EXPECT_EQ(p->screens[0].width,3840);EXPECT_EQ(p->screens[0].frame_w,1920);
+  EXPECT_EQ(p->screens[1].frame_w,2560);
+}
+TEST(DisplayPlan, Four1080pTilesFitH264Grid) {
+  client_packing::budget_t b;b.active=true;b.axis=4032;b.pixels=16257024;b.strict=true;
+  client_packing::scope scope(b);
+  auto p=display_plan::make({{"DP-1",0,0,1920,1080,true}}, {},3,false);
+  ASSERT_TRUE(p);EXPECT_EQ(p->frame_width,3840);EXPECT_EQ(p->frame_height,2160);
+}

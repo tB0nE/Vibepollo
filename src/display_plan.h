@@ -17,6 +17,8 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "virtual_display_modes.h"
+#include "client_packing_budget.h"
 
 namespace display_plan {
 
@@ -47,11 +49,13 @@ namespace display_plan {
     bool is_primary = false;  ///< The screen clients and Meteor's depth treat as the main one.
     int width = 0, height = 0;  ///< Its size on the desktop.
     int frame_x = 0, frame_y = 0;  ///< Where it sits in the frame; zero when not enabled.
+    int requested_w = 0, requested_h = 0;
     int frame_w = 0, frame_h = 0;  ///< Its size in the frame: width x height unless the plan is scaled.
   };
 
   struct plan_t {
     int frame_width = 0, frame_height = 0;
+    bool profiled = false;
     std::vector<screen_t> screens;
 
     std::vector<const screen_t *> enabled() const {
@@ -103,8 +107,8 @@ namespace display_plan {
   }  // namespace detail
 
   /**
-   * @brief Lays the enabled screens out in rows at their frame sizes: one row if it fits, else
-   *        the fewest rows that do. Sets each screen's frame position and returns the frame size.
+   * @brief Lays the enabled screens out in rows at their frame sizes: the least-padded fitting grid,
+   *        breaking equal-area ties by the smallest maximum dimension. Sets each screen's frame position and returns the frame size.
    */
   inline std::pair<int, int> pack(std::vector<screen_t *> &screens, int max_axis = max_axis_px, long long max_total = max_total_px) {
     if (screens.empty()) {
@@ -112,14 +116,19 @@ namespace display_plan {
     }
     std::size_t best_cols = screens.size();
     auto best = detail::canvas(screens, best_cols);
-    for (std::size_t rows = 1; rows <= screens.size(); ++rows) {
-      const auto cols = (screens.size() + rows - 1) / rows;
+    bool found_fit = false;
+    for (std::size_t cols = screens.size(); cols > 0; --cols) {
       const auto size = detail::canvas(screens, cols);
       if (fits(size.first, size.second, max_axis, max_total)) {
-        best_cols = cols;
-        break;
+        const auto area=1LL*size.first*size.second;
+        const auto best_area=1LL*best.first*best.second;
+        if (!found_fit || area<best_area || (area==best_area && std::max(size.first,size.second)<std::max(best.first,best.second))) {
+          best_cols=cols;best=size;
+        }
+        found_fit=true;
+        continue;
       }
-      if (std::max(size.first, size.second) < std::max(best.first, best.second)) {
+      if (!found_fit && std::max(size.first, size.second) < std::max(best.first, best.second)) {
         best_cols = cols;
         best = size;
       }
@@ -133,8 +142,8 @@ namespace display_plan {
    */
   inline std::pair<int, int> pack_to_fit(std::vector<screen_t *> &screens, int max_axis = max_axis_px, long long max_total = max_total_px) {
     for (auto *s : screens) {
-      s->frame_w = s->width;
-      s->frame_h = s->height;
+      s->frame_w = s->requested_w > 0 ? s->requested_w : s->width;
+      s->frame_h = s->requested_h > 0 ? s->requested_h : s->height;
     }
     auto size = pack(screens, max_axis, max_total);
     if (screens.empty() || fits(size.first, size.second, max_axis, max_total)) {
@@ -156,8 +165,8 @@ namespace display_plan {
     }
     // Rounded down to even sizes (4:2:0 chroma), so each row stays within the scaled total.
     for (auto *s : screens) {
-      s->frame_w = std::max(2, static_cast<int>(std::floor(s->width * best_scale)) & ~1);
-      s->frame_h = std::max(2, static_cast<int>(std::floor(s->height * best_scale)) & ~1);
+      s->frame_w = std::max(2, static_cast<int>(std::floor((s->requested_w > 0 ? s->requested_w : s->width) * best_scale)) & ~1);
+      s->frame_h = std::max(2, static_cast<int>(std::floor((s->requested_h > 0 ? s->requested_h : s->height) * best_scale)) & ~1);
     }
     return detail::place(screens, best_cols);
   }
@@ -175,7 +184,7 @@ namespace display_plan {
    *         the encoder's largest frame at full size are scaled down evenly (frame_w, frame_h).
    */
   inline std::optional<plan_t> make(std::vector<physical_t> physical, const std::vector<std::string> &selected,
-                                    int virtual_count, bool virtual_only) {
+                                    int virtual_count, bool virtual_only, const virtual_display_modes::modes_t &modes = {}) {
     // Left to right, then top to bottom, so the frame reads like the desk.
     std::stable_sort(physical.begin(), physical.end(), [](const auto &a, const auto &b) {
       return a.x != b.x ? a.x < b.x : a.y < b.y;
@@ -203,15 +212,16 @@ namespace display_plan {
     }
     const int vw = main_monitor ? main_monitor->width : 1920;
     const int vh = main_monitor ? main_monitor->height : 1080;
-    for (int n = 1; n <= std::clamp(virtual_count, 0, 4); ++n) {
+    for (int n = 1; n <= std::clamp(virtual_count, 0, 64); ++n) {
       screen_t s;
       s.id = "v" + std::to_string(n);
       s.label = "virtual-" + std::to_string(n);
       s.is_virtual = true;
       s.virtual_index = n;
       s.enabled = true;
-      s.width = vw;
-      s.height = vh;
+      const auto size = virtual_display_modes::size(modes, n-1, vw, vh);
+      s.width = size.first;
+      s.height = size.second;
       plan.screens.push_back(std::move(s));
     }
 
@@ -233,9 +243,32 @@ namespace display_plan {
     }
     (primary_screen ? primary_screen : enabled.front())->is_primary = true;
 
-    const int max_axis = std::clamp(encoder_max_axis.load(), 256, max_axis_px);
-    std::tie(plan.frame_width, plan.frame_height) = pack_to_fit(enabled, max_axis);
-    if (!fits(plan.frame_width, plan.frame_height, max_axis)) {
+    auto &budget=client_packing::request;
+    if (budget.active && !budget.valid) return std::nullopt;
+    const int max_axis = std::min(std::clamp(encoder_max_axis.load(), 256, max_axis_px),budget.active?budget.axis:max_axis_px);
+    const long long max_pixels=budget.active?budget.pixels:max_total_px;
+    plan.profiled=budget.active;
+    for (auto *screen:enabled) {
+      double scale=1.0;
+      const bool explicit_virtual=screen->is_virtual && screen->virtual_index<=static_cast<int>(modes.size()) && modes[screen->virtual_index-1].first>0;
+      if (budget.active && !explicit_virtual) {
+        scale=budget.physical_scale/100.0;
+        if (budget.physical_w>0 && budget.physical_h>0)
+          scale=std::min({1.0,(double)budget.physical_w/screen->width,(double)budget.physical_h/screen->height});
+        if (auto mode=budget.physical_modes.find(screen->id);mode!=budget.physical_modes.end())
+          scale=std::min({1.0,(double)mode->second.first/screen->width,(double)mode->second.second/screen->height});
+      }
+      screen->requested_w=std::max(2,(int)std::floor(screen->width*scale)&~1);
+      screen->requested_h=std::max(2,(int)std::floor(screen->height*scale)&~1);
+      screen->frame_w=screen->requested_w;screen->frame_h=screen->requested_h;
+      budget.requested_sizes[screen->id]={screen->requested_w,screen->requested_h};
+    }
+    const auto unscaled=pack(enabled,max_axis,max_pixels);
+    budget.seen=true;
+    budget.fits=fits(unscaled.first,unscaled.second,max_axis,max_pixels);
+    if (budget.active && budget.strict && !budget.fits) return std::nullopt;
+    std::tie(plan.frame_width, plan.frame_height) = pack_to_fit(enabled,max_axis,max_pixels);
+    if (!fits(plan.frame_width, plan.frame_height, max_axis,max_pixels)) {
       return std::nullopt;
     }
     return plan;

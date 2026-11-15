@@ -198,3 +198,16 @@ TEST(KwinVirtualLayout, PackedSkipsMonitorsInBetweenAndRectangleLimits) {
   EXPECT_EQ(layout->outputs.back().x, 5120 + 3 * 2560);
   EXPECT_EQ(layout->outputs.back().y, 0);
 }
+
+TEST(KwinVirtualLayout, PackedCustomMonitorsUseIndependentSizesAndNonoverlappingPositions) {
+  std::string error;
+  virtual_display_modes::modes_t modes{{1280,720},{1920,1440}};
+  auto result = kv::plan(two_side_by_side, {"DP-1"}, 2, false, error, true, modes);
+  ASSERT_TRUE(result) << error;
+  ASSERT_EQ(result->outputs.size(),4u);
+  EXPECT_EQ(result->outputs[2].width,1280);
+  EXPECT_EQ(result->outputs[2].height,720);
+  EXPECT_EQ(result->outputs[3].width,1920);
+  EXPECT_EQ(result->outputs[3].height,1440);
+  EXPECT_EQ(result->outputs[3].x,result->outputs[2].x+1280);
+}
