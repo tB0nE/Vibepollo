@@ -243,7 +243,7 @@ namespace display_plan {
     }
     (primary_screen ? primary_screen : enabled.front())->is_primary = true;
 
-    auto &budget=client_packing::request;
+    auto &budget=client_packing::request();
     if (budget.active && !budget.valid) return std::nullopt;
     const int max_axis = std::min(std::clamp(encoder_max_axis.load(), 256, max_axis_px),budget.active?budget.axis:max_axis_px);
     const long long max_pixels=budget.active?budget.pixels:max_total_px;

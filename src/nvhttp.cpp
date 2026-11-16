@@ -2019,9 +2019,9 @@ namespace nvhttp {
                 }
                 const auto &resolution = device.m_info->m_resolution;
                 if (resolution.m_width > 0 && resolution.m_height > 0) {
-                  vd_width = resolution.m_width;
-                  vd_height = resolution.m_height;
-                  BOOST_LOG(info) << "Virtual display sized to the primary monitor: " << vd_width << 'x' << vd_height;
+                  recovery_params.width = static_cast<uint32_t>(resolution.m_width);
+                  recovery_params.height = static_cast<uint32_t>(resolution.m_height);
+                  BOOST_LOG(info) << "Virtual display sized to the primary monitor: " << recovery_params.width << 'x' << recovery_params.height;
                 }
                 break;
               }
@@ -2111,14 +2111,14 @@ namespace nvhttp {
                 extra_uid.c_str(),
                 extra_label.c_str(),
                 hdr_profile,
-                vd_width,
-                vd_height,
-                vd_fps,
+                recovery_params.width,
+                recovery_params.height,
+                recovery_params.fps,
                 extra_guid,
-                base_vd_fps_millihz,
-                framegen_refresh_active,
-                refresh_multiplier,
-                virtual_display_hdr_requested,
+                recovery_params.base_fps_millihz,
+                recovery_params.framegen_refresh_active,
+                recovery_params.framegen_refresh_multiplier,
+                recovery_params.hdr_requested,
                 false,
                 !shared_mode,
                 true
@@ -4934,7 +4934,7 @@ namespace nvhttp {
     }
     void packing_metadata(nlohmann::json &output) {
       if (!output.value("tiled",false)) return;
-      const auto &b=client_packing::request;
+      const auto &b=client_packing::request();
       output["packing_budget_version"]=1;
       const auto current=display_plan::get();
       output["packing_profiled"]=b.active || (current && current->profiled);

@@ -121,7 +121,7 @@ TEST(DisplayPlan, ClientH264BudgetPreservesTwo1440pTiles) {
   client_packing::scope scope(b);
   auto p=display_plan::make(one_1440p(),{},1,false);
   ASSERT_TRUE(p);EXPECT_EQ(p->frame_width,2560);EXPECT_EQ(p->frame_height,2880);
-  EXPECT_TRUE(client_packing::request.fits);EXPECT_TRUE(p->profiled);
+  EXPECT_TRUE(client_packing::request().fits);EXPECT_TRUE(p->profiled);
   EXPECT_FALSE(display_plan::make(one_1440p(),{},2,false));
 }
 TEST(DisplayPlan, ClientBudgetScopeAndEncoderLimit) {
@@ -131,7 +131,7 @@ TEST(DisplayPlan, ClientBudgetScopeAndEncoderLimit) {
     encoder_limit limit{4096};
     EXPECT_FALSE(display_plan::make(one_1440p(),{},2,false));
   }
-  EXPECT_FALSE(client_packing::request.active);
+  EXPECT_FALSE(client_packing::request().active);
 }
 TEST(DisplayPlan, PhysicalProfilePreservesDesktopAndCustomVirtualMode) {
   client_packing::budget_t b;b.active=true;b.axis=8192;b.pixels=21233664;
