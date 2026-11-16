@@ -2026,6 +2026,12 @@ namespace nvhttp {
                 break;
               }
             }
+            // A size the client chose for this display (virtual_modes=) wins.
+            if (const auto [w, h] = virtual_display_modes::size(launch_session->virtual_modes, 0, 0, 0); w > 0 && h > 0) {
+              recovery_params.width = static_cast<uint32_t>(w);
+              recovery_params.height = static_cast<uint32_t>(h);
+              BOOST_LOG(info) << "Virtual display 1 sized as requested: " << w << 'x' << h;
+            }
           }
           VDISPLAY::setWatchdogFeedingEnabled(true);
           const char *hdr_profile = launch_session->hdr_profile ? launch_session->hdr_profile->c_str() : nullptr;
@@ -2107,12 +2113,15 @@ namespace nvhttp {
               GUID extra_guid {};
               std::memcpy(&extra_guid, extra_uuid.b8, sizeof(extra_guid));
               const std::string extra_label = client_label + " " + std::to_string(extra + 1);
+              const auto [extra_w, extra_h] = virtual_display_modes::size(
+                launch_session->virtual_modes, extra, (int) recovery_params.width, (int) recovery_params.height
+              );
               auto extra_info = VDISPLAY::createVirtualDisplay(
                 extra_uid.c_str(),
                 extra_label.c_str(),
                 hdr_profile,
-                recovery_params.width,
-                recovery_params.height,
+                static_cast<uint32_t>(extra_w),
+                static_cast<uint32_t>(extra_h),
                 recovery_params.fps,
                 extra_guid,
                 recovery_params.base_fps_millihz,
@@ -4960,7 +4969,7 @@ namespace nvhttp {
 #endif
 #ifdef _WIN32
       if (std::getenv("METEOR_WINDOWS_MULTIMONITOR")) {
-        auto plan = platf::dxgi::make_plan(outputs, virtual_count);
+        auto plan = platf::dxgi::make_plan(outputs, virtual_count, modes);
         if (!plan) {
           error = "The selected screens can't be streamed together";
         }
@@ -4985,14 +4994,52 @@ namespace nvhttp {
         return 0;
       }
       try {
-        #if defined(__linux__)
+#if defined(__linux__)
         return std::clamp(std::stoi(value), 0, 64);
+#elif defined(_WIN32)
+        // The virtual display driver's session displays (kWindowsDriverMaxTemporaryDisplays).
+        return std::clamp(std::stoi(value), 0, 8);
 #else
         return std::clamp(std::stoi(value), 0, 4);
 #endif
       } catch (...) {
         return 0;
       }
+    }
+
+    /// Whether this host makes each virtual display at the size the client asks for.
+    bool virtual_modes_supported() {
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      return platf::kwin_available() && !linux_desktop::gnome();
+#elif defined(_WIN32)
+      return std::getenv("METEOR_WINDOWS_MULTIMONITOR") != nullptr;
+#else
+      return false;
+#endif
+    }
+
+    /// The virtual display sizes a request asks for (empty when it names none), or nothing
+    /// when they are malformed or this host can't make them.
+    std::optional<virtual_display_modes::modes_t> requested_virtual_modes(const args_t &args) {
+      const auto text = get_arg(args, "virtual_modes", "");
+      if (text.empty()) {
+        return virtual_display_modes::modes_t {};
+      }
+      if (!virtual_modes_supported()) {
+        return std::nullopt;
+      }
+      auto modes = virtual_display_modes::parse(text, requested_virtual_count(args));
+#ifdef _WIN32
+      // The driver's own limits (libvirtualdisplay control_protocol.h), below the shared ones.
+      if (modes) {
+        for (const auto &[w, h] : *modes) {
+          if (w > 7680 || h > 4320 || 1LL * w * h > 7680LL * 4320LL) {
+            return std::nullopt;
+          }
+        }
+      }
+#endif
+      return modes;
     }
 
     /**
@@ -5833,17 +5880,13 @@ launch_session->exact_target_hold.reset();
       // requested_outputs with their connector names, which would read as a physical selection
       // (and bring the primary monitor back for virtual_only).
       const auto plan_request = requested_outputs;
-      if (!get_arg(args, "virtual_modes", "").empty()) {
-        bool supported = false;
-#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
-        supported = platf::kwin_available() && !linux_desktop::gnome();
-#endif
-        if (!supported || !virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args))) {
-          tree.put("root.<xmlattr>.status_code", 400);
-          tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
-          tree.put("root.gamesession", 0);
-          return;
-        }
+      if (const auto modes = requested_virtual_modes(args)) {
+        launch_session->virtual_modes = *modes;
+      } else {
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
+        tree.put("root.gamesession", 0);
+        return;
       }
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
@@ -5887,7 +5930,7 @@ launch_session->exact_target_hold.reset();
       // usual per-client display, the rest are created beside it.
       if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
         try {
-          launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+          launch_session->extra_virtual_displays = std::max(requested_virtual_count(args), 1) - 1;
           BOOST_LOG(info) << "Client requested "sv << (launch_session->extra_virtual_displays + 1) << " virtual display(s)"sv;
         } catch (...) {
           BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
@@ -6564,7 +6607,7 @@ launch_session->exact_target_hold.reset();
     request_audio_hold.attach(launch_session->audio_context_guard);
     if (const auto requested_virtual_displays = get_arg(args, "virtual_displays", ""); !requested_virtual_displays.empty()) {
       try {
-        launch_session->extra_virtual_displays = std::clamp(std::stoi(requested_virtual_displays), 1, 4) - 1;
+        launch_session->extra_virtual_displays = std::max(requested_virtual_count(args), 1) - 1;
       } catch (...) {
         BOOST_LOG(warning) << "Ignoring invalid virtual_displays value '"sv << requested_virtual_displays << "'"sv;
       }
@@ -6577,17 +6620,13 @@ launch_session->exact_target_hold.reset();
       // requested_outputs with their connector names, which would read as a physical selection
       // (and bring the primary monitor back for virtual_only).
       const auto plan_request = requested_outputs;
-      if (!get_arg(args, "virtual_modes", "").empty()) {
-        bool supported = false;
-#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
-        supported = platf::kwin_available() && !linux_desktop::gnome();
-#endif
-        if (!supported || !virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args))) {
-          tree.put("root.<xmlattr>.status_code", 400);
-          tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
-          tree.put("root.gamesession", 0);
-          return;
-        }
+      if (const auto modes = requested_virtual_modes(args)) {
+        launch_session->virtual_modes = *modes;
+      } else {
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
+        tree.put("root.gamesession", 0);
+        return;
       }
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
@@ -7541,22 +7580,14 @@ launch_session->exact_target_hold.reset();
 
     const auto size_args = request->parse_query_string();
     client_packing::scope packing_scope(client_decode_budget(size_args));
-    if (!get_arg(size_args, "virtual_modes", "").empty()) {
-      bool supported = false;
-#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
-      supported = platf::kwin_available() && !linux_desktop::gnome();
-#endif
-      if (!supported || !virtual_display_modes::parse(get_arg(size_args, "virtual_modes", ""), requested_virtual_count(size_args))) {
-        response->write(SimpleWeb::StatusCode::client_error_bad_request);
-        return;
-      }
+    if (!requested_virtual_modes(size_args)) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request);
+      return;
     }
     nlohmann::json output;
     output["version"] = 1;
     output["source"] = "host_manifest";
-#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
-    output["virtual_modes_supported"] = platf::kwin_available();
-#endif
+    output["virtual_modes_supported"] = virtual_modes_supported();
     output["frame_size"] = {0, 0};
     output["desktop_bounds"] = {0, 0, 0, 0};
     output["monitors"] = nlohmann::json::array();
@@ -7628,7 +7659,7 @@ launch_session->exact_target_hold.reset();
       if (asks_for_plan) {
         const auto outputs = get_arg(args, "virtual_only", "") == "1" ? std::string {capture_outputs::virtual_only_token} :
                                                                          get_arg(args, "outputs", "");
-        plan = platf::dxgi::make_plan(outputs, requested_virtual_count(args));
+        plan = platf::dxgi::make_plan(outputs, requested_virtual_count(args), requested_virtual_modes(args).value_or(virtual_display_modes::modes_t {}));
       } else {
         plan = platf::dxgi::session_plan();
       }

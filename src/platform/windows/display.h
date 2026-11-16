@@ -50,7 +50,7 @@ namespace platf::dxgi {
   /// multi-monitor capture is off or more than one GPU drives the desktop.
   std::optional<std::vector<attached_output_t>> attached_outputs();
   /// The plan for `requested` (comma-separated output names, or the virtual-only token).
-  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count);
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count, const virtual_display_modes::modes_t &modes = {});
   /// The plan the current session launched with, else one made from what is attached.
   std::optional<display_plan::plan_t> session_plan();
   /// The output streamed in each of the plan's screens, where it is attached.
