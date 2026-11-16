@@ -54,6 +54,7 @@
 #include "display_helper_integration.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "host_cursor_visibility.h"
 #include "hardware_metrics.h"
 #include "hdr_request_policy.h"
 #include "httpcommon.h"
@@ -4861,31 +4862,31 @@ namespace nvhttp {
   #endif
       }
 
-      std::optional<std::string> prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error) {
+      std::optional<std::string> prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error, const virtual_display_modes::modes_t &modes = {}) {
   #ifdef SUNSHINE_BUILD_MUTTER
         if (gnome()) {
           return platf::mutter_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
         }
   #endif
-        return platf::kwin_prepare_virtual_outputs(outputs, count, refresh_millihz, error);
+        return platf::kwin_prepare_virtual_outputs(outputs, count, refresh_millihz, error, modes);
       }
 
-      std::optional<display_plan::plan_t> make_plan(const std::string &outputs, int virtual_count) {
+      std::optional<display_plan::plan_t> make_plan(const std::string &outputs, int virtual_count, const virtual_display_modes::modes_t &modes = {}) {
   #ifdef SUNSHINE_BUILD_MUTTER
         if (gnome()) {
           return platf::mutter_make_plan(outputs, virtual_count);
         }
   #endif
-        return platf::kwin_available() ? platf::kwin_make_plan(outputs, virtual_count) : std::nullopt;
+        return platf::kwin_available() ? platf::kwin_make_plan(outputs, virtual_count, modes) : std::nullopt;
       }
 
-      std::optional<platf::desktop_manifest_t> plan_manifest(const std::string &outputs, int count, bool virtual_only) {
+      std::optional<platf::desktop_manifest_t> plan_manifest(const std::string &outputs, int count, bool virtual_only, const virtual_display_modes::modes_t &modes = {}) {
   #ifdef SUNSHINE_BUILD_MUTTER
         if (gnome()) {
           return platf::mutter_plan_manifest(outputs, count, virtual_only);
         }
   #endif
-        return platf::kwin_plan_manifest(outputs, count, virtual_only);
+        return platf::kwin_plan_manifest(outputs, count, virtual_only, modes);
       }
 
       std::optional<platf::desktop_manifest_t> session_manifest() {
@@ -4904,11 +4905,53 @@ namespace nvhttp {
      *        display exists. Nothing when Meteor's multi-monitor capture is off.
      * @param error Set when the screens asked for can't be streamed together.
      */
-    std::optional<display_plan::plan_t> plan_for_request(const std::string &outputs, int virtual_count, std::string &error) {
+    client_packing::budget_t client_decode_budget(const args_t &args) {
+      client_packing::budget_t b;
+      if (get_arg(args,"nf_budget","")!="1") return b;
+      b.active=true;
+      try {
+        b.axis=std::stoi(get_arg(args,"nf_max_axis","8192"));
+        b.pixels=std::stoll(get_arg(args,"nf_max_pixels","35389440"));
+        b.physical_w=std::stoi(get_arg(args,"nf_physical_w","0"));
+        b.physical_h=std::stoi(get_arg(args,"nf_physical_h","0"));
+        b.physical_scale=std::stoi(get_arg(args,"nf_physical_scale","100"));
+        b.strict=get_arg(args,"nf_require_fit","")=="1";
+        const auto profiles=get_arg(args,"nf_physical_modes","");
+        if (profiles.size()>4096) throw std::invalid_argument("physical profiles too long");
+        std::istringstream input(profiles);std::string profile;
+        while (std::getline(input,profile,',')) {
+          const auto colon=profile.find(':');
+          const auto name=profile.substr(0,colon);
+          if (colon==std::string::npos || name.size()<2 || name[0]!='m' || name.find_first_not_of("0123456789",1)!=std::string::npos)
+            throw std::invalid_argument("invalid physical profile");
+          auto mode=virtual_display_modes::parse(profile.substr(colon+1),1);
+          if (!mode || mode->empty() || mode->front().first==0) throw std::invalid_argument("invalid physical dimensions");
+          if (!b.physical_modes.emplace(name,mode->front()).second) throw std::invalid_argument("duplicate physical profile");
+        }
+        b.valid=b.axis>=256 && b.axis<=8192 && b.pixels>=65536 && b.pixels<=35389440 && b.physical_w>=0 && b.physical_w<=8192 && b.physical_h>=0 && b.physical_h<=8192 && ((b.physical_w==0)==(b.physical_h==0)) && b.physical_scale>=1 && b.physical_scale<=150;
+      } catch (...) {b.valid=false;}
+      return b;
+    }
+    void packing_metadata(nlohmann::json &output) {
+      if (!output.value("tiled",false)) return;
+      const auto &b=client_packing::request;
+      output["packing_budget_version"]=1;
+      const auto current=display_plan::get();
+      output["packing_profiled"]=b.active || (current && current->profiled);
+      if (b.active) {
+        const auto frame=output.value("frame_size",std::vector<int>{0,0});
+        output["packing_fits"]=b.valid && b.seen && b.fits && frame.size()==2 && display_plan::fits(frame[0],frame[1],b.axis,b.pixels);
+        output["packing_max_axis"]=std::min(b.axis,display_plan::encoder_max_axis.load());
+        output["packing_max_pixels"]=b.pixels;
+        output["packing_requested_sizes"]=b.requested_sizes;
+      }
+    }
+
+    std::optional<display_plan::plan_t> plan_for_request(const std::string &outputs, int virtual_count, std::string &error, const virtual_display_modes::modes_t &modes = {}) {
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma and GNOME: several screens are packed from their own streams (pipewire_multi.cpp).
       if (platf::kwin_available() || linux_desktop::gnome()) {
-        auto plan = linux_desktop::make_plan(outputs, virtual_count);
+        auto plan = linux_desktop::make_plan(outputs, virtual_count, modes);
         if (!plan) {
           error = "The selected screens can't be streamed together";
         }
@@ -4942,7 +4985,11 @@ namespace nvhttp {
         return 0;
       }
       try {
+        #if defined(__linux__)
+        return std::clamp(std::stoi(value), 0, 64);
+#else
         return std::clamp(std::stoi(value), 0, 4);
+#endif
       } catch (...) {
         return 0;
       }
@@ -5015,6 +5062,7 @@ namespace nvhttp {
       });
 
       auto args = request->parse_query_string();
+      client_packing::scope packing_scope(client_decode_budget(args));
 
       if (
         args.find("rikey"s) == std::end(args) ||
@@ -5785,12 +5833,24 @@ launch_session->exact_target_hold.reset();
       // requested_outputs with their connector names, which would read as a physical selection
       // (and bring the primary monitor back for virtual_only).
       const auto plan_request = requested_outputs;
+      if (!get_arg(args, "virtual_modes", "").empty()) {
+        bool supported = false;
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+        supported = platf::kwin_available() && !linux_desktop::gnome();
+#endif
+        if (!supported || !virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args))) {
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
       // monitors. Only the first viewer of a session decides what it captures.
       if (!has_stream_session_activity()) {
         std::string virtual_error;
-        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error, virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args)).value_or(virtual_display_modes::modes_t{}))) {
           requested_outputs = std::move(*prepared);
         } else {
           BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
@@ -5834,7 +5894,7 @@ launch_session->exact_target_hold.reset();
         }
       }
       std::string plan_error;
-      const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
+      const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error, virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args)).value_or(virtual_display_modes::modes_t{}));
       if (!plan_error.empty()) {
         BOOST_LOG(warning) << "Rejecting launch: "sv << plan_error;
         tree.put("root.<xmlattr>.status_code", 400);
@@ -6315,6 +6375,7 @@ launch_session->exact_target_hold.reset();
     }
 
     auto args = request->parse_query_string();
+    client_packing::scope packing_scope(client_decode_budget(args));
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args)
@@ -6516,12 +6577,24 @@ launch_session->exact_target_hold.reset();
       // requested_outputs with their connector names, which would read as a physical selection
       // (and bring the primary monitor back for virtual_only).
       const auto plan_request = requested_outputs;
+      if (!get_arg(args, "virtual_modes", "").empty()) {
+        bool supported = false;
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+        supported = platf::kwin_available() && !linux_desktop::gnome();
+#endif
+        if (!supported || !virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args))) {
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "Invalid or unsupported custom virtual monitor sizes");
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
 #if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
       // KDE Plasma: make the session's virtual monitors, then capture them with the chosen
       // monitors. Only the first viewer of a session decides what it captures.
       if (!has_stream_session_activity()) {
         std::string virtual_error;
-        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (auto prepared = linux_desktop::prepare_virtual_outputs(requested_outputs, requested_virtual_count(args), launch_session->fps, virtual_error, virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args)).value_or(virtual_display_modes::modes_t{}))) {
           requested_outputs = std::move(*prepared);
         } else {
           BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
@@ -6555,7 +6628,7 @@ launch_session->exact_target_hold.reset();
       return;
     }
     std::string plan_error;
-    const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error);
+    const auto session_plan = plan_for_request(plan_request, requested_virtual_count(args), plan_error, virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args)).value_or(virtual_display_modes::modes_t{}));
     if (!plan_error.empty()) {
       BOOST_LOG(warning) << "Rejecting resume: "sv << plan_error;
       tree.put("root.<xmlattr>.status_code", 400);
@@ -7223,7 +7296,7 @@ launch_session->exact_target_hold.reset();
   }
 
   void getClipboard(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+    // Never log clipboard payloads.
 
     auto verified_client = get_verified_cert(request);
 
@@ -7264,12 +7337,15 @@ launch_session->exact_target_hold.reset();
     }
 
     std::string content = platf::get_clipboard();
-    response->write(content);
+    if (content.size()>65536) {response->write(SimpleWeb::StatusCode::client_error_payload_too_large);return;}
+    SimpleWeb::CaseInsensitiveMultimap headers;headers.emplace("Content-Type","text/plain; charset=utf-8");
+    headers.emplace("Cache-Control","no-store");
+    response->write(SimpleWeb::StatusCode::success_ok,content,headers);
     return;
   }
 
   void setClipboard(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+    // Never log clipboard payloads.
 
     auto verified_client = get_verified_cert(request);
 
@@ -7309,7 +7385,9 @@ launch_session->exact_target_hold.reset();
       return;
     }
 
+    if (request->content.size()>65536) {response->write(SimpleWeb::StatusCode::client_error_payload_too_large);return;}
     std::string content = request->content.string();
+    if (content.find('\0')!=std::string::npos) {response->write(SimpleWeb::StatusCode::client_error_bad_request);return;}
 
     bool success = platf::set_clipboard(content);
 
@@ -7318,6 +7396,7 @@ launch_session->exact_target_hold.reset();
 
       response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
       response->close_connection_after_response = true;
+      return;
     }
 
     response->write();
@@ -7406,6 +7485,43 @@ launch_session->exact_target_hold.reset();
     response->close_connection_after_response = true;
   }
 
+  // Polaris-compatible cursor control used by Nightfall. The paired TLS
+  // certificate must have stream-view permission, as for the display manifest.
+  void getCursorStatus(resp_https_t response, req_https_t request) {
+    if (!has_client_perm(get_verified_cert(request), PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    response->write(nlohmann::json {{"cursor_visible", host_cursor_visibility::visible()}}.dump(), headers);
+  }
+
+  void setCursorVisibility(resp_https_t response, req_https_t request) {
+    if (!has_client_perm(get_verified_cert(request), PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      return;
+    }
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    try {
+      char body[4097];
+      request->content.read(body, sizeof(body));
+      const auto size = request->content.gcount();
+      if (size > 4096) throw std::runtime_error("Cursor request too large");
+      const auto value = nlohmann::json::parse(body, body + size);
+      if (!value.contains("visible") || !value["visible"].is_boolean()) {
+        throw std::runtime_error("visible must be a boolean");
+      }
+      const bool visible = value["visible"].get<bool>();
+      host_cursor_visibility::set_visible(visible);
+      response->write(nlohmann::json {{"visible", visible}}.dump(), headers);
+    } catch (const std::exception &e) {
+      response->write(SimpleWeb::StatusCode::client_error_bad_request,
+        nlohmann::json {{"error", e.what()}}.dump(), headers);
+    }
+  }
+
   /**
    * @brief GET /polaris/v1/display/manifest: where each monitor is in the captured frame.
    *
@@ -7423,9 +7539,24 @@ launch_session->exact_target_hold.reset();
       return;
     }
 
+    const auto size_args = request->parse_query_string();
+    client_packing::scope packing_scope(client_decode_budget(size_args));
+    if (!get_arg(size_args, "virtual_modes", "").empty()) {
+      bool supported = false;
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+      supported = platf::kwin_available() && !linux_desktop::gnome();
+#endif
+      if (!supported || !virtual_display_modes::parse(get_arg(size_args, "virtual_modes", ""), requested_virtual_count(size_args))) {
+        response->write(SimpleWeb::StatusCode::client_error_bad_request);
+        return;
+      }
+    }
     nlohmann::json output;
     output["version"] = 1;
     output["source"] = "host_manifest";
+#if defined(__linux__) && defined(SUNSHINE_BUILD_KWIN)
+    output["virtual_modes_supported"] = platf::kwin_available();
+#endif
     output["frame_size"] = {0, 0};
     output["desktop_bounds"] = {0, 0, 0, 0};
     output["monitors"] = nlohmann::json::array();
@@ -7477,6 +7608,7 @@ launch_session->exact_target_hold.reset();
       }
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
+      packing_metadata(output);
       response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
       response->close_connection_after_response = true;
       return;
@@ -7535,6 +7667,7 @@ launch_session->exact_target_hold.reset();
       }
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
+      packing_metadata(output);
       response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
       response->close_connection_after_response = true;
       return;
@@ -7549,7 +7682,7 @@ launch_session->exact_target_hold.reset();
                                  args.find("virtual_only") != args.end();
       if (asks_for_plan) {
         const bool virtual_only = get_arg(args, "virtual_only", "") == "1";
-        manifest = linux_desktop::plan_manifest(get_arg(args, "outputs", ""), requested_virtual_count(args), virtual_only);
+        manifest = linux_desktop::plan_manifest(get_arg(args, "outputs", ""), requested_virtual_count(args), virtual_only, virtual_display_modes::parse(get_arg(args, "virtual_modes", ""), requested_virtual_count(args)).value_or(virtual_display_modes::modes_t{}));
         output["planned"] = true;
       } else {
         manifest = linux_desktop::session_manifest();
@@ -7596,7 +7729,8 @@ launch_session->exact_target_hold.reset();
 
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
+    packing_metadata(output);
+      response->write(SimpleWeb::StatusCode::success_ok, output.dump(), headers);
     response->close_connection_after_response = true;
   }
 
@@ -8138,6 +8272,8 @@ launch_session->exact_target_hold.reset();
       );
     };
     https_server.resource["^/api/abr/capabilities$"]["GET"] = getAbrCapabilities;
+    https_server.resource["^/polaris/v1/session/status$"]["GET"] = getCursorStatus;
+    https_server.resource["^/polaris/v1/session/cursor$"]["POST"] = setCursorVisibility;
     https_server.resource["^/polaris/v1/display/manifest$"]["GET"] = getDisplayManifest;
     https_server.resource["^/pyrowave-bandwidth-probe$"]["GET"] = getPyroWaveBandwidthProbe;
     https_server.resource["^/pyrowave-udp-probe$"]["GET"] = [run_blocking_nvhttp](auto resp, auto req) {

@@ -778,9 +778,9 @@ namespace kwin {
     }
 
     /// Makes exactly `count` virtual monitors of `width` x `height` exist.
-    bool ensure(int count, int width, int height, std::string &error) {
+    bool ensure(int count, int width, int height, std::string &error, const virtual_display_modes::modes_t &modes) {
       return run([&] {
-        return do_ensure(count, width, height, error);
+        return do_ensure(count, width, height, error, modes);
       });
     }
 
@@ -956,13 +956,13 @@ namespace kwin {
       return true;
     }
 
-    bool do_ensure(int count, int width, int height, std::string &error) {
+    bool do_ensure(int count, int width, int height, std::string &error, const virtual_display_modes::modes_t &modes) {
       count = std::clamp(count, 0, platf::kwin_virtual::max_count);
       std::lock_guard lock {state_mutex};
       std::erase_if(streams, [](const auto &s) {
         return s->closed || s->failed;
       });
-      if (!streams.empty() && (width != size_w || height != size_h)) {
+      if (!streams.empty() && (width != size_w || height != size_h || modes != requested_modes)) {
         // KWin can't resize a virtual output; make them again at the new size.
         close_locked();
       }
@@ -978,17 +978,19 @@ namespace kwin {
       }
       size_w = width;
       size_h = height;
+      requested_modes = modes;
       for (int index = static_cast<int>(streams.size()) + 1; index <= count; ++index) {
         auto entry = std::make_unique<stream_t>();
         const auto name = platf::kwin_virtual::requested_name(index);
         const auto description = "Nightfall virtual monitor " + std::to_string(index);
         const auto scale = wl_fixed_from_double(1.0);
+        const auto size = virtual_display_modes::size(modes, index-1, width, height);
         entry->stream = screencast_version >= 4 ?
                           zkde_screencast_unstable_v1_stream_virtual_output_with_description(
-                            screencast, name.c_str(), description.c_str(), width, height, scale, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_HIDDEN
+                            screencast, name.c_str(), description.c_str(), size.first, size.second, scale, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_HIDDEN
                           ) :
                           zkde_screencast_unstable_v1_stream_virtual_output(
-                            screencast, name.c_str(), width, height, scale, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_HIDDEN
+                            screencast, name.c_str(), size.first, size.second, scale, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_HIDDEN
                           );
         zkde_screencast_stream_unstable_v1_add_listener(entry->stream, &stream_listener, entry.get());
         streams.push_back(std::move(entry));
@@ -1105,6 +1107,7 @@ namespace kwin {
     std::mutex state_mutex;
     std::vector<std::unique_ptr<stream_t>> streams;
     int size_w = 0, size_h = 0;
+    virtual_display_modes::modes_t requested_modes;
     std::atomic_uint64_t release_generation {0};
 
     wl_display *display = nullptr;
@@ -1541,7 +1544,7 @@ namespace platf {
 
   namespace {
     /// The layout a launch with these options gets, from the desktop as it is now.
-    std::optional<kwin_virtual::layout_t> virtual_layout(const std::string &outputs, int count, std::string &error) {
+    std::optional<kwin_virtual::layout_t> virtual_layout(const std::string &outputs, int count, std::string &error, const virtual_display_modes::modes_t &modes) {
       kwin::screencast_t screencast;
       if (screencast.init(false) < 0 || !screencast.kwin_available() || !screencast.supports_workspace()) {
         error = "Virtual monitors need KWin's region capture";
@@ -1554,11 +1557,11 @@ namespace platf {
       }
       const bool virtual_only = outputs == capture_outputs::virtual_only_token;
       // Each screen is captured on its own and packed (packed_t), so the row only has to sit beside the desktop.
-      return kwin_virtual::plan(*descriptors, virtual_only ? std::vector<std::string> {} : split_csv(outputs), count, virtual_only, error, true);
+      return kwin_virtual::plan(*descriptors, virtual_only ? std::vector<std::string> {} : split_csv(outputs), count, virtual_only, error, true, modes);
     }
   }  // namespace
 
-  std::optional<display_plan::plan_t> kwin_make_plan(const std::string &outputs, int virtual_count) {
+  std::optional<display_plan::plan_t> kwin_make_plan(const std::string &outputs, int virtual_count, const virtual_display_modes::modes_t &modes) {
     if (window_system != window_system_e::WAYLAND || (!config::video.capture.empty() && config::video.capture != "kwin")) {
       return std::nullopt;
     }
@@ -1577,7 +1580,7 @@ namespace platf {
       }
     }
     const bool virtual_only = outputs == capture_outputs::virtual_only_token;
-    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(outputs), virtual_count, virtual_only);
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(outputs), virtual_count, virtual_only, modes);
   }
 
   /// A plan as a manifest: frame rects from the plan, desktop rects from `outputs`.
@@ -1628,9 +1631,9 @@ namespace platf {
     return manifest;
   }
 
-  std::optional<desktop_manifest_t> kwin_plan_manifest(const std::string &outputs, int count, bool virtual_only) {
+  std::optional<desktop_manifest_t> kwin_plan_manifest(const std::string &outputs, int count, bool virtual_only, const virtual_display_modes::modes_t &modes) {
     const auto request = virtual_only ? std::string {capture_outputs::virtual_only_token} : outputs;
-    const auto plan = kwin_make_plan(request, count);
+    const auto plan = kwin_make_plan(request, count, modes);
     if (!plan) {
       return std::nullopt;
     }
@@ -1638,7 +1641,7 @@ namespace platf {
     std::string error;
     std::vector<output_descriptor_t> positions;
     if (count > 0 || virtual_only) {
-      if (const auto layout = virtual_layout(request, count, error)) {
+      if (const auto layout = virtual_layout(request, count, error, modes)) {
         positions = layout->outputs;
       }
     } else {
@@ -1663,7 +1666,7 @@ namespace platf {
     return plan_manifest(*plan, positions);
   }
 
-  std::optional<std::string> kwin_prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error) {
+  std::optional<std::string> kwin_prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error, const virtual_display_modes::modes_t &modes) {
     auto &owner = kwin::virtual_outputs_t::get();
     owner.cancel_scheduled_release();
     const bool virtual_only = outputs == capture_outputs::virtual_only_token;
@@ -1677,14 +1680,16 @@ namespace platf {
       error = "This desktop can't make virtual monitors (KDE Plasma on Wayland only)";
       return std::nullopt;
     }
-    const auto layout = virtual_layout(outputs, count, error);
+    const auto layout = virtual_layout(outputs, count, error, modes);
     if (!layout) {
       return std::nullopt;
     }
     const auto row = std::find_if(layout->outputs.begin(), layout->outputs.end(), [](const auto &out) {
       return out.is_virtual;
     });
-    if (row == layout->outputs.end() || !owner.ensure(count, row->width, row->height, error)) {
+    virtual_display_modes::modes_t actual_modes;
+    for (const auto &out : layout->outputs) if (out.is_virtual) actual_modes.emplace_back(out.width, out.height);
+    if (row == layout->outputs.end() || !owner.ensure(count, row->width, row->height, error, actual_modes)) {
       return std::nullopt;
     }
     if (!kwin::place_virtual_outputs(layout->outputs, error)) {

@@ -19,10 +19,11 @@
 #include <vector>
 
 #include "display_manifest.h"
+#include "../../virtual_display_modes.h"
 #include "wayland_workspace.h"
 
 namespace platf::kwin_virtual {
-  inline constexpr int max_count = 4;
+  inline constexpr int max_count = 64;
   /// KWin names an output made by stream_virtual_output "Virtual-" plus the name asked for.
   inline constexpr std::string_view requested_prefix = "Nightfall-Virtual-";
   inline constexpr std::string_view output_prefix = "Virtual-Nightfall-Virtual-";
@@ -69,7 +70,8 @@ namespace platf::kwin_virtual {
     int count,
     bool virtual_only,
     std::string &error,
-    bool packed = false
+    bool packed = false,
+    const virtual_display_modes::modes_t &modes = {}
   ) {
     std::erase_if(physical, [](const auto &out) {
       return out.is_virtual || is_virtual_output(out.name);
@@ -132,8 +134,9 @@ namespace platf::kwin_virtual {
       out.name = output_name(index);
       out.x = x;
       out.y = y;
-      out.width = main->width;
-      out.height = main->height;
+      const auto size = virtual_display_modes::size(modes, index-1, main->width, main->height);
+      out.width = size.first;
+      out.height = size.second;
       out.primary = virtual_only && index == 1;
       out.is_virtual = true;
       return out;
@@ -179,8 +182,11 @@ namespace platf::kwin_virtual {
     if (packed) {
       layout_t result;
       result.outputs = base;
+      int next_x = right;
       for (int i = 1; i <= count; ++i) {
-        result.outputs.push_back(make_virtual(i, right + (i - 1) * main->width, top));
+        auto output = make_virtual(i, next_x, top);
+        next_x += output.width;
+        result.outputs.push_back(std::move(output));
       }
       for (const auto &out : result.outputs) {
         if (out.is_virtual || std::find(chosen.begin(), chosen.end(), out.name) != chosen.end()) {

@@ -24,19 +24,19 @@ namespace platf {
    *                        to the stream's rate.
    * @return The outputs the session captures, or nothing with `error` set.
    */
-  std::optional<std::string> kwin_prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error);
+  std::optional<std::string> kwin_prepare_virtual_outputs(const std::string &outputs, int count, int refresh_millihz, std::string &error, const virtual_display_modes::modes_t &modes = {});
 
   /**
    * @brief The session's screen plan (display_plan.h) from KWin's outputs.
    * @param outputs The outputs= list, or capture_outputs::virtual_only_token.
    */
-  std::optional<display_plan::plan_t> kwin_make_plan(const std::string &outputs, int virtual_count);
+  std::optional<display_plan::plan_t> kwin_make_plan(const std::string &outputs, int virtual_count, const virtual_display_modes::modes_t &modes = {});
 
   /// The running session's packed layout, when it has several screens.
   std::optional<desktop_manifest_t> kwin_session_manifest();
 
   /// The manifest a launch with these options would get, before its virtual monitors exist.
-  std::optional<desktop_manifest_t> kwin_plan_manifest(const std::string &outputs, int count, bool virtual_only);
+  std::optional<desktop_manifest_t> kwin_plan_manifest(const std::string &outputs, int count, bool virtual_only, const virtual_display_modes::modes_t &modes = {});
 
   void kwin_release_virtual_outputs();
   /// Removes the virtual monitors after `delay` unless a launch or resume cancels it first.
