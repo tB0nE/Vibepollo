@@ -230,7 +230,7 @@ namespace platf::macos {
       }
       std::ofstream out {file, std::ios::trunc};
       out << plan.frame_width << ' ' << plan.frame_height << ' ' << (*primary)->frame_x << ' ' << (*primary)->frame_y
-          << ' ' << (*primary)->width << ' ' << (*primary)->height << '\n';
+          << ' ' << (*primary)->frame_w << ' ' << (*primary)->frame_h << '\n';
     }
   }  // namespace
 
@@ -517,10 +517,11 @@ namespace platf {
         source->label = screen.label;
         source->frame_x = screen.frame_x;
         source->frame_y = screen.frame_y;
-        source->width = screen.width;
-        source->height = screen.height;
+        // Its size in the frame: the desktop size, unless the plan was scaled to fit the encoder.
+        source->width = screen.frame_w > 0 ? screen.frame_w : screen.width;
+        source->height = screen.frame_h > 0 ? screen.frame_h : screen.height;
         next.push_back(source);
-        tiles.push_back({screen.frame_x, screen.frame_y, screen.width, screen.height,
+        tiles.push_back({screen.frame_x, screen.frame_y, source->width, source->height,
                          placed[i]->x, placed[i]->y, placed[i]->points_w, placed[i]->points_h});
       }
       sources = std::move(next);
