@@ -13,6 +13,13 @@ if stage.exists():shutil.rmtree(stage)
 binary=build/'vibepollo'
 if not binary.is_file():raise SystemExit('Build vibepollo first')
 shutil.copy2(binary,stage/'bin/vibepollo')
+binaries=[stage/'bin/vibepollo']
+dependency_inputs=[binary]
+for name in ['wl-copy','wl-paste','xclip']:
+ source=shutil.which(name)
+ if not source:raise SystemExit('Missing clipboard helper: '+name)
+ target=stage/'bin'/name
+ shutil.copy2(source,target);binaries.append(target);dependency_inputs.append(Path(source))
 # Relative asset paths in SUNSHINE_BUILD_METEOR resolve from the executable.
 shutil.copytree(build/'assets',stage/'share/vibepollo')
 wrapper=stage/'bin/meteor-vibepollo'
@@ -21,7 +28,7 @@ wrapper.chmod(0o755)
 # Graphics and device libraries must come from the host driver stack. Never
 # ship vendor drivers or a second glibc/loader in the portable package.
 external=re.compile(r'^(?:ld-linux|lib(?:c\.|m\.|mvec\.|dl\.|pthread\.|rt\.|resolv\.|nss_|cuda\.|nvidia|GL|EGL|OpenGL|vulkan\.|va(?:-|\.)|drm|gbm\.|wayland|X11|xcb|pipewire|pulse|gio-|glib-|gobject-|gmodule-|systemd\.|udev\.|dbus-))')
-queue=[binary];copied={};packages=set();requirements=set()
+queue=list(dependency_inputs);copied={};packages={'wl-clipboard','xclip'};requirements=set()
 while queue:
  path=queue.pop()
  output=subprocess.check_output(['ldd',str(path)],text=True)
@@ -37,9 +44,9 @@ while queue:
   query=subprocess.run(['dpkg-query','-S',str(src)],text=True,capture_output=True)
   for row in query.stdout.splitlines():
    if ': ' in row:packages.add(row.split(': ',1)[0])
-for path in [stage/'bin/vibepollo',*[stage/'lib'/name for name in copied]]:
+for path in [*binaries,*[stage/'lib'/name for name in copied]]:
  subprocess.run(['patchelf','--set-rpath','$ORIGIN/../lib' if path.parent.name=='bin' else '$ORIGIN',str(path)],check=True)
-subprocess.run(['strip','--strip-unneeded',str(stage/'bin/vibepollo')],check=True)
+for binary_file in binaries:subprocess.run(['strip','--strip-unneeded',str(binary_file)],check=True)
 doc=stage/'share/doc/meteor-vibepollo'
 shutil.copy2(ROOT/'LICENSE',doc/'LICENSE')
 shutil.copy2(ROOT/'METEOR_DEVELOPMENT.md',doc/'DEVELOPMENT_BASELINE.md')
@@ -86,7 +93,7 @@ manifest={'name':'Meteor-Vibepollo for Nightfall','version':version,'source_comm
  'files':{str(p.relative_to(stage)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(stage.rglob('*')) if p.is_file()}}
 (stage/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 # Prove every packaged ELF stays within the stated glibc baseline.
-for p in [stage/'bin/vibepollo',*[stage/'lib'/name for name in copied]]:
+for p in [*binaries,*[stage/'lib'/name for name in copied]]:
  table=subprocess.check_output(['objdump','-T',str(p)],text=True)
  needed={tuple(map(int,s.split('.'))) for s in re.findall(r'GLIBC_([0-9.]+)',table)}
  if needed and max(needed)>(2,35):raise SystemExit('glibc baseline exceeded: '+str(p)+' '+str(max(needed)))

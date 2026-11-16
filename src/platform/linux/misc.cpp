@@ -53,6 +53,7 @@
 
 // local includes
 #include "graphics.h"
+#include "clipboard_tools.h"
 #include "wayland_workspace.h"
 #include "src/capture_outputs.h"
 #include "misc.h"
@@ -1824,14 +1825,14 @@ namespace platf {
 
   std::string
     get_clipboard() {
-    // Placeholder
-    return "";
+    auto text=clipboard_tools::get();
+    if (!text) BOOST_LOG(warning) << "Clipboard read unavailable (helper, display or text selection)";
+    return text.value_or("");
   }
 
   bool
     set_clipboard(const std::string &content) {
-    // Placeholder
-    return false;
+    return clipboard_tools::set(content);
   }
 
   std::string find_render_node_with_display() {

@@ -7296,7 +7296,7 @@ launch_session->exact_target_hold.reset();
   }
 
   void getClipboard(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+    // Never log clipboard payloads.
 
     auto verified_client = get_verified_cert(request);
 
@@ -7337,12 +7337,15 @@ launch_session->exact_target_hold.reset();
     }
 
     std::string content = platf::get_clipboard();
-    response->write(content);
+    if (content.size()>65536) {response->write(SimpleWeb::StatusCode::client_error_payload_too_large);return;}
+    SimpleWeb::CaseInsensitiveMultimap headers;headers.emplace("Content-Type","text/plain; charset=utf-8");
+    headers.emplace("Cache-Control","no-store");
+    response->write(SimpleWeb::StatusCode::success_ok,content,headers);
     return;
   }
 
   void setClipboard(resp_https_t response, req_https_t request) {
-    print_req<SunshineHTTPS>(request);
+    // Never log clipboard payloads.
 
     auto verified_client = get_verified_cert(request);
 
@@ -7382,7 +7385,9 @@ launch_session->exact_target_hold.reset();
       return;
     }
 
+    if (request->content.size()>65536) {response->write(SimpleWeb::StatusCode::client_error_payload_too_large);return;}
     std::string content = request->content.string();
+    if (content.find('\0')!=std::string::npos) {response->write(SimpleWeb::StatusCode::client_error_bad_request);return;}
 
     bool success = platf::set_clipboard(content);
 
@@ -7391,6 +7396,7 @@ launch_session->exact_target_hold.reset();
 
       response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
       response->close_connection_after_response = true;
+      return;
     }
 
     response->write();
