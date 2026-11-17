@@ -4978,7 +4978,7 @@ namespace nvhttp {
 #endif
 #ifdef __APPLE__
       if (platf::macos::multimonitor_enabled()) {
-        auto plan = platf::macos::make_plan(outputs, virtual_count);
+        auto plan = platf::macos::make_plan(outputs, virtual_count, modes);
         if (!plan) {
           error = "The selected screens can't be streamed together";
         }
@@ -4999,6 +4999,8 @@ namespace nvhttp {
 #elif defined(_WIN32)
         // The virtual display driver's session displays (kWindowsDriverMaxTemporaryDisplays).
         return std::clamp(std::stoi(value), 0, 8);
+#elif defined(__APPLE__)
+        return std::clamp(std::stoi(value), 0, platf::macos::max_virtual_outputs);
 #else
         return std::clamp(std::stoi(value), 0, 4);
 #endif
@@ -5013,6 +5015,9 @@ namespace nvhttp {
       return platf::kwin_available() && !linux_desktop::gnome();
 #elif defined(_WIN32)
       return std::getenv("METEOR_WINDOWS_MULTIMONITOR") != nullptr;
+#elif defined(__APPLE__)
+      // CGVirtualDisplay makes any mode it's given.
+      return platf::macos::multimonitor_enabled();
 #else
       return false;
 #endif
@@ -5910,7 +5915,7 @@ launch_session->exact_target_hold.reset();
       if (platf::macos::multimonitor_enabled() && !has_stream_session_activity()) {
         platf::macos::cancel_virtual_outputs_release();
         std::string virtual_error;
-        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, launch_session->virtual_modes, virtual_error)) {
           BOOST_LOG(warning) << "Rejecting launch: "sv << virtual_error;
           tree.put("root.<xmlattr>.status_code", 400);
           tree.put("root.<xmlattr>.status_message", virtual_error);
@@ -6650,7 +6655,7 @@ launch_session->exact_target_hold.reset();
       if (platf::macos::multimonitor_enabled() && !has_stream_session_activity()) {
         platf::macos::cancel_virtual_outputs_release();
         std::string virtual_error;
-        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, virtual_error)) {
+        if (!platf::macos::prepare_virtual_outputs(requested_virtual_count(args), launch_session->fps, launch_session->virtual_modes, virtual_error)) {
           BOOST_LOG(warning) << "Rejecting resume: "sv << virtual_error;
           tree.put("root.<xmlattr>.status_code", 400);
           tree.put("root.<xmlattr>.status_message", virtual_error);
@@ -7597,12 +7602,12 @@ launch_session->exact_target_hold.reset();
     if (platf::macos::multimonitor_enabled()) {
       const auto args = request->parse_query_string();
       const bool asks_for_plan = args.find("outputs") != args.end() || args.find("virtual_displays") != args.end() ||
-                                 args.find("virtual_only") != args.end();
+                                 args.find("virtual_only") != args.end() || args.find("virtual_modes") != args.end();
       std::optional<display_plan::plan_t> plan;
       if (asks_for_plan) {
         const auto outputs = get_arg(args, "virtual_only", "") == "1" ? std::string {capture_outputs::virtual_only_token} :
                                                                          get_arg(args, "outputs", "");
-        plan = platf::macos::make_plan(outputs, requested_virtual_count(args));
+        plan = platf::macos::make_plan(outputs, requested_virtual_count(args), requested_virtual_modes(args).value_or(virtual_display_modes::modes_t {}));
       } else {
         plan = platf::macos::session_plan();
       }

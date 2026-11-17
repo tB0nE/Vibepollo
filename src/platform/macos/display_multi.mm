@@ -296,7 +296,7 @@ namespace platf::macos {
     return outputs;
   }
 
-  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count) {
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count, const virtual_display_modes::modes_t &modes) {
     std::vector<display_plan::physical_t> physical;
     for (const auto &o : attached_outputs()) {
       if (o.is_virtual) {
@@ -305,7 +305,7 @@ namespace platf::macos {
       physical.push_back({o.name, (int) o.x, (int) o.y, o.width, o.height, o.primary});
     }
     const bool virtual_only = requested == capture_outputs::virtual_only_token;
-    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only);
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only, modes);
   }
 
   std::optional<display_plan::plan_t> session_plan() {
@@ -760,9 +760,9 @@ namespace platf {
 }  // namespace platf
 
 namespace platf::macos {
-  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path) {
+  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path, const virtual_display_modes::modes_t &modes) {
     std::string error;
-    if (!prepare_virtual_outputs(virtual_count, 60, error)) {
+    if (!prepare_virtual_outputs(virtual_count, 60, modes, error)) {
       std::fprintf(stderr, "virtual displays: %s\n", error.c_str());
       return 1;
     }
@@ -783,7 +783,7 @@ namespace platf::macos {
     for (const auto &name : platf::display_names(mem_type_e::videotoolbox)) {
       std::printf("display_names: %s\n", name.c_str());
     }
-    auto plan = make_plan(outputs, virtual_count);
+    auto plan = make_plan(outputs, virtual_count, modes);
     if (!plan) {
       std::fprintf(stderr, "no plan\n");
       release_virtual_outputs();
