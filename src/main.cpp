@@ -331,8 +331,11 @@ int main(int argc, char *argv[]) {
   }
 #ifdef __APPLE__
   if (argc >= 2 && argv[1] == "--meteor-display-layout"sv) {
-    // --meteor-display-layout [outputs|@virtual] [virtual displays]: the plan a launch would get.
-    const auto plan = platf::macos::make_plan(argc > 2 ? argv[2] : "", argc > 3 ? std::atoi(argv[3]) : 0);
+    // --meteor-display-layout [outputs|@virtual] [virtual displays] [virtual_modes]: the plan a launch would get.
+    const int virtual_count = argc > 3 ? std::atoi(argv[3]) : 0;
+    const auto modes = virtual_display_modes::parse(argc > 4 ? argv[4] : "", virtual_count);
+    if (!modes) { std::fprintf(stderr, "Invalid virtual_modes\n"); return 1; }
+    const auto plan = platf::macos::make_plan(argc > 2 ? argv[2] : "", virtual_count, *modes);
     if (!plan) { std::fprintf(stderr, "Unsupported monitor selection\n"); return 1; }
     std::printf("frame=%dx%d\n", plan->frame_width, plan->frame_height);
     for (const auto &m : plan->screens)
@@ -341,8 +344,10 @@ int main(int argc, char *argv[]) {
     return 0;
   }
   if (argc >= 4 && argv[1] == "--meteor-capture-probe"sv) {
-    // --meteor-capture-probe <virtual displays> <out.nv12> [outputs|@virtual]
-    return platf::macos::capture_probe(argc > 4 ? argv[4] : "", std::atoi(argv[2]), argv[3]);
+    // --meteor-capture-probe <virtual displays> <out.nv12> [outputs|@virtual] [virtual_modes]
+    const auto modes = virtual_display_modes::parse(argc > 5 ? argv[5] : "", std::atoi(argv[2]));
+    if (!modes) { std::fprintf(stderr, "Invalid virtual_modes\n"); return 1; }
+    return platf::macos::capture_probe(argc > 4 ? argv[4] : "", std::atoi(argv[2]), argv[3], *modes);
   }
 #endif
 #ifdef _WIN32

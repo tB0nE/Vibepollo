@@ -230,7 +230,7 @@ namespace platf::macos {
       }
       std::ofstream out {file, std::ios::trunc};
       out << plan.frame_width << ' ' << plan.frame_height << ' ' << (*primary)->frame_x << ' ' << (*primary)->frame_y
-          << ' ' << (*primary)->width << ' ' << (*primary)->height << '\n';
+          << ' ' << (*primary)->frame_w << ' ' << (*primary)->frame_h << '\n';
     }
   }  // namespace
 
@@ -296,7 +296,7 @@ namespace platf::macos {
     return outputs;
   }
 
-  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count) {
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count, const virtual_display_modes::modes_t &modes) {
     std::vector<display_plan::physical_t> physical;
     for (const auto &o : attached_outputs()) {
       if (o.is_virtual) {
@@ -305,7 +305,7 @@ namespace platf::macos {
       physical.push_back({o.name, (int) o.x, (int) o.y, o.width, o.height, o.primary});
     }
     const bool virtual_only = requested == capture_outputs::virtual_only_token;
-    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only);
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only, modes);
   }
 
   std::optional<display_plan::plan_t> session_plan() {
@@ -517,10 +517,11 @@ namespace platf {
         source->label = screen.label;
         source->frame_x = screen.frame_x;
         source->frame_y = screen.frame_y;
-        source->width = screen.width;
-        source->height = screen.height;
+        // Its size in the frame: the desktop size, unless the plan was scaled to fit the encoder.
+        source->width = screen.frame_w > 0 ? screen.frame_w : screen.width;
+        source->height = screen.frame_h > 0 ? screen.frame_h : screen.height;
         next.push_back(source);
-        tiles.push_back({screen.frame_x, screen.frame_y, screen.width, screen.height,
+        tiles.push_back({screen.frame_x, screen.frame_y, source->width, source->height,
                          placed[i]->x, placed[i]->y, placed[i]->points_w, placed[i]->points_h});
       }
       sources = std::move(next);
@@ -759,9 +760,9 @@ namespace platf {
 }  // namespace platf
 
 namespace platf::macos {
-  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path) {
+  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path, const virtual_display_modes::modes_t &modes) {
     std::string error;
-    if (!prepare_virtual_outputs(virtual_count, 60, error)) {
+    if (!prepare_virtual_outputs(virtual_count, 60, modes, error)) {
       std::fprintf(stderr, "virtual displays: %s\n", error.c_str());
       return 1;
     }
@@ -782,7 +783,7 @@ namespace platf::macos {
     for (const auto &name : platf::display_names(mem_type_e::videotoolbox)) {
       std::printf("display_names: %s\n", name.c_str());
     }
-    auto plan = make_plan(outputs, virtual_count);
+    auto plan = make_plan(outputs, virtual_count, modes);
     if (!plan) {
       std::fprintf(stderr, "no plan\n");
       release_virtual_outputs();

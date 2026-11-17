@@ -40,8 +40,8 @@ namespace platf::macos {
   std::vector<attached_output_t> attached_outputs();
 
   /// The plan a launch with `requested` (outputs=, or capture_outputs::virtual_only_token) and
-  /// `virtual_count` virtual displays gets.
-  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count);
+  /// `virtual_count` virtual displays, sized as `modes` asks (virtual_modes=), gets.
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count, const virtual_display_modes::modes_t &modes = {});
 
   /// The plan of the session being streamed; one made from the desktop as it is otherwise.
   std::optional<display_plan::plan_t> session_plan();
@@ -50,11 +50,13 @@ namespace platf::macos {
   std::vector<std::optional<attached_output_t>> place(const display_plan::plan_t &plan, const std::vector<attached_output_t> &outputs);
 
   /**
-   * @brief Makes the session's virtual displays (the primary display's size) and keeps them
-   *        until released. 0 removes any this host made.
+   * @brief Makes the session's virtual displays and keeps them until released. Each is the size
+   *        `modes` asks for (virtual_modes=), else the primary display's. 0 removes any this host made.
    * @return False with `error` set when they can't be made.
    */
-  bool prepare_virtual_outputs(int count, int fps, std::string &error);
+  bool prepare_virtual_outputs(int count, int fps, const virtual_display_modes::modes_t &modes, std::string &error);
+  /// The most virtual displays a session can have.
+  constexpr int max_virtual_outputs = 8;
   void release_virtual_outputs();
   /// Removes them after `delay` unless a launch or resume cancels it first.
   void schedule_virtual_outputs_release(std::chrono::seconds delay);
@@ -89,6 +91,6 @@ namespace platf::macos {
    *        the plan for `outputs` once through the multi-display capture, writes the NV12 frame
    *        to `path` and prints its size. Returns 0 on success.
    */
-  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path);
+  int capture_probe(const std::string &outputs, int virtual_count, const std::string &path, const virtual_display_modes::modes_t &modes = {});
 
 }  // namespace platf::macos

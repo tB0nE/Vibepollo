@@ -108,7 +108,7 @@ namespace platf::dxgi {
     return outputs;
   }
 
-  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count) {
+  std::optional<display_plan::plan_t> make_plan(const std::string &requested, int virtual_count, const virtual_display_modes::modes_t &modes) {
     const auto outputs = attached_outputs();
     if (!outputs) return std::nullopt;
     std::vector<display_plan::physical_t> physical;
@@ -118,7 +118,7 @@ namespace platf::dxgi {
       physical.push_back({o.name, r.left, r.top, r.right - r.left, r.bottom - r.top, r.left == 0 && r.top == 0});
     }
     const bool virtual_only = requested == capture_outputs::virtual_only_token;
-    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only);
+    return display_plan::make(physical, virtual_only ? std::vector<std::string> {} : split_csv(requested), virtual_count, virtual_only, modes);
   }
 
   std::optional<display_plan::plan_t> session_plan() {

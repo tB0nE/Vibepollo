@@ -61,7 +61,7 @@ namespace platf::macos {
       std::mutex mutex;
       NSMutableArray *displays = nil;  ///< CGVirtualDisplay objects; a display lives while retained.
       std::vector<std::uint32_t> ids;
-      int width = 0, height = 0;
+      std::vector<std::pair<int, int>> sizes;  ///< Each display's mode, in the order they were made.
       double refresh = 0;
       std::uint64_t release_generation = 0;  ///< Bumped to cancel a scheduled release.
     };
@@ -131,11 +131,12 @@ namespace platf::macos {
           CGConfigureDisplayMirrorOfDisplay(config, display, master);
         }
       }
+      // In a row to the right of the desktop, tops aligned; sizes may differ.
       double x = right;
-      for (const auto id : s.ids) {
-        CGConfigureDisplayMirrorOfDisplay(config, id, kCGNullDirectDisplay);
-        CGConfigureDisplayOrigin(config, id, (int32_t) x, (int32_t) top);
-        x += s.width;  // One point per pixel (hiDPI off).
+      for (std::size_t i = 0; i < s.ids.size(); ++i) {
+        CGConfigureDisplayMirrorOfDisplay(config, s.ids[i], kCGNullDirectDisplay);
+        CGConfigureDisplayOrigin(config, s.ids[i], (int32_t) x, (int32_t) top);
+        x += s.sizes[i].first;  // One point per pixel (hiDPI off).
       }
       if (const auto error = CGCompleteDisplayConfiguration(config, kCGConfigureForAppOnly); error != kCGErrorSuccess) {
         BOOST_LOG(warning) << "Virtual displays: can't arrange them on the desktop (error "sv << error << ')';
@@ -150,7 +151,7 @@ namespace platf::macos {
       [s.displays release];
       s.displays = nil;
       s.ids.clear();
-      s.width = s.height = 0;
+      s.sizes.clear();
       s.refresh = 0;
     }
 
@@ -190,11 +191,11 @@ namespace platf::macos {
     return s.ids;
   }
 
-  bool prepare_virtual_outputs(int count, int fps, std::string &error) {
+  bool prepare_virtual_outputs(int count, int fps, const virtual_display_modes::modes_t &modes, std::string &error) {
     auto &s = state();
     std::lock_guard lock {s.mutex};
     ++s.release_generation;
-    count = std::clamp(count, 0, 4);
+    count = std::clamp(count, 0, max_virtual_outputs);
     if (count == 0) {
       release_locked(s);
       return true;
@@ -205,8 +206,12 @@ namespace platf::macos {
     }
     // The stream's rate; launch requests carry it in millihertz on some paths.
     const double refresh = fps > 1000 ? fps / 1000.0 : (fps > 0 ? fps : 60);
-    const auto [width, height] = primary_size(s);
-    if ((int) s.ids.size() == count && s.width == width && s.height == height && std::abs(s.refresh - refresh) < 0.01) {
+    const auto [primary_width, primary_height] = primary_size(s);
+    std::vector<std::pair<int, int>> sizes;
+    for (int n = 0; n < count; ++n) {
+      sizes.push_back(virtual_display_modes::size(modes, n, primary_width, primary_height));
+    }
+    if ((int) s.ids.size() == count && s.sizes == sizes && std::abs(s.refresh - refresh) < 0.01) {
       return true;
     }
     release_locked(s);
@@ -219,6 +224,7 @@ namespace platf::macos {
       Class mode_class = NSClassFromString(@"CGVirtualDisplayMode");
       s.displays = [[NSMutableArray alloc] init];
       for (int n = 1; n <= count; ++n) {
+        const auto [width, height] = sizes[n - 1];
         CGVirtualDisplayDescriptor *descriptor = [[descriptor_class alloc] init];
         descriptor.queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
         descriptor.name = [NSString stringWithFormat:@"Nightfall Virtual %d", n];
@@ -256,8 +262,7 @@ namespace platf::macos {
         [display release];
       }
     }
-    s.width = width;
-    s.height = height;
+    s.sizes = sizes;
     s.refresh = refresh;
 
     // They join the desktop shortly after being made.
@@ -273,7 +278,11 @@ namespace platf::macos {
            std::any_of(s.ids.begin(), s.ids.end(), [](auto id) { return CGDisplayIsInMirrorSet(id); })) {
       std::this_thread::sleep_for(50ms);
     }
-    BOOST_LOG(info) << "Virtual displays: made "sv << count << " at "sv << width << 'x' << height << '@' << refresh << " Hz"sv;
+    std::string made;
+    for (const auto &[w, h] : sizes) {
+      made += (made.empty() ? "" : ", ") + std::to_string(w) + 'x' + std::to_string(h);
+    }
+    BOOST_LOG(info) << "Virtual displays: made "sv << count << " ("sv << made << ") at "sv << refresh << " Hz"sv;
     return true;
   }
 

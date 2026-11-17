@@ -10,11 +10,17 @@ struct budget_t {
  long long pixels=35389440;
  std::map<std::string,std::pair<int,int>> physical_modes, requested_sizes;
 };
-inline thread_local budget_t request;
+// The budget of the request being handled on this thread. A function-local thread_local:
+// MinGW emits a TLS init function for an inline namespace-scope one in every object file
+// and then fails to link them ("multiple definition of TLS init function").
+inline budget_t &request() {
+ static thread_local budget_t value;
+ return value;
+}
 struct scope {
  budget_t previous;
- explicit scope(budget_t value):previous(request){request=value;}
- ~scope(){request=previous;}
+ explicit scope(budget_t value):previous(request()){request()=value;}
+ ~scope(){request()=previous;}
  scope(const scope&)=delete;
  scope& operator=(const scope&)=delete;
 };

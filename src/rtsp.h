@@ -9,6 +9,7 @@
 #include "framegen_policy.h"
 #include "hdr_stream_policy.h"
 #include "remote_session.h"
+#include "virtual_display_modes.h"
 
 #include <array>
 #include <atomic>
@@ -171,6 +172,9 @@ namespace rtsp_stream {
     int extra_virtual_displays = 0;
     /// Device ids of those extra displays once they exist.
     std::vector<std::string> extra_virtual_display_device_ids;
+    /// Client-requested size of each virtual display (`virtual_modes=` on /launch); 0x0 or
+    /// missing entries match the primary physical monitor.
+    virtual_display_modes::modes_t virtual_modes;
 
     /// @brief Pre-virtual-display device refresh rates captured before VD creation.
     /// Maps device_id to {numerator, denominator} of the original refresh rate.

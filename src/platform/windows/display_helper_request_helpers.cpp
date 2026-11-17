@@ -123,6 +123,7 @@ namespace display_helper_integration::helpers {
       snapshot.virtual_display_topology_snapshot = session.virtual_display_topology_snapshot;
       snapshot.extra_virtual_displays = session.extra_virtual_displays;
       snapshot.extra_virtual_display_device_ids = session.extra_virtual_display_device_ids;
+      snapshot.virtual_modes = session.virtual_modes;
       snapshot.pre_virtual_display_refresh_rates = session.pre_virtual_display_refresh_rates;
       snapshot.gen1_framegen_fix = session.gen1_framegen_fix;
       snapshot.gen2_framegen_fix = session.gen2_framegen_fix;
