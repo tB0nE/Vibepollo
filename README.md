@@ -1,4 +1,38 @@
-# Vibepollo
+# Meteor-Vibepollo
+
+This is Nightfall Meteor's managed-host fork of
+[Nonary/Vibepollo](https://github.com/Nonary/Vibepollo), itself based on Apollo
+and Sunshine. It supplies GameStream desktop capture, encoding, input and display
+management for [Nightfall](https://github.com/tB0nE/nightfall). Meteor handles
+host-side AI depth and PCVR separately.
+
+## Using this fork with Nightfall
+
+Install [Nightfall Meteor](https://github.com/tB0nE/nightfall/releases) on your
+PC and use its Setup window to install the built-in host. You do not need to
+install the upstream host separately. Meteor manages a versioned host package
+and its configuration; existing compatible external hosts remain an option.
+
+The portable Linux package is installed in the user's application-data area.
+Its setup differs from the upstream machine-wide service and kernel-driver
+instructions reproduced below. Follow the Meteor setup flow and packaging guide
+for this fork, rather than running an upstream installation script.
+
+- [Portable Linux packaging and build instructions](packaging/meteor/README.md)
+- [Development baseline and integration history](METEOR_DEVELOPMENT.md)
+- [Fork CI configuration and Windows driver-release requirements (pending CI repair)](https://github.com/tB0nE/Vibepollo/blob/codex/fork-ci-repairs/.github/FORK_CI.md)
+- [Managed-host release packages and matching source archives](https://github.com/tB0nE/Vibepollo/releases)
+- [Nightfall managed-host release guide](https://github.com/tB0nE/nightfall/blob/main/docs/guides/meteor-host-releases.md)
+
+Development notes include historical checkpoints; use Meteor's pinned host
+release to identify the package shipped with a particular Nightfall version.
+The fork retains upstream licensing and attribution. Features and installation
+requirements in the upstream overview below may differ from Meteor's portable
+packages.
+
+---
+
+# Vibepollo — upstream overview
 
 ## What is Vibepollo?
 
