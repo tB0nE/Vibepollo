@@ -348,7 +348,10 @@ jobs:
           package_options=(-si)
           validation_tree=""
           compiler_log=""
-          if [[ "$VALIDATION_ONLY" == "true" ]]; then
+          # PR merge commits exist in the controller checkout but need not be
+          # reachable through a normal clone of the repository. Seed that exact
+          # source for PR builds too, without installing packages or updating it.
+          if [[ "$VALIDATION_ONLY" == "true" || "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
             validation_tree=$(git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" rev-parse "$COMMIT^{tree}")
             sudo -u builder bash "$GITHUB_WORKSPACE/scripts/seed-linux-package-source.sh" \
               "$GITHUB_WORKSPACE" "$PWD/vibepollo" "$CLONE_URL" "$COMMIT"

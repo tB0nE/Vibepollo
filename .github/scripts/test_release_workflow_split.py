@@ -388,7 +388,7 @@ srcdir="$PWD"
         workflow = load_workflow("ci-archlinux.yml")
         steps = {step["name"]: step for step in workflow["jobs"]["build_archlinux"]["steps"] if "name" in step}
         build = steps["Build PKGBUILD"]["run"]
-        validation = build.split('if [[ "$VALIDATION_ONLY" == "true" ]]; then', 1)[1].split("\nfi", 1)[0]
+        validation = build.split('if [[ "$VALIDATION_ONLY" == "true" || "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then', 1)[1].split("\nfi", 1)[0]
         self.assertIn("seed-linux-package-source.sh", validation)
         self.assertIn("package_options=(-s --holdver)", validation)
         self.assertIn("package_options=(-si)", build.split("validation_tree=", 1)[0])
@@ -504,7 +504,7 @@ esac
         for operation in ("openssl req", "dkms add", "dkms build", "dkms install"):
             self.assertGreater(drm.index(operation), end)
         self.assertIn('package_options=(-s --holdver)', steps["Build PKGBUILD"]["run"])
-        self.assertIn('if [[ "$VALIDATION_ONLY" == "true" ]]', steps["Build PKGBUILD"]["run"])
+        self.assertIn('if [[ "$VALIDATION_ONLY" == "true" || "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]', steps["Build PKGBUILD"]["run"])
         recipe = (ROOT / "packaging/linux/Arch/PKGBUILD").read_text()
         self.assertIn("--no-tests=error", recipe)
         self.assertIn("sm_61", recipe)
