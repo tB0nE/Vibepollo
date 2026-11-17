@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   build:
+    # Upstream publishes its site; forks opt in only after configuring Pages.
+    if: github.repository == 'Nonary/Vibepollo' || vars.ENABLE_GITHUB_PAGES == 'true'
     name: Assemble Pages site
     runs-on: ubuntu-latest
     permissions:

@@ -49,7 +49,9 @@ jobs:
           python3 -m unittest discover -s .github/scripts -p test_vhf_release_identity.py
           python3 .github/scripts/vhf_release_identity.py --source-commit "$RELEASE_COMMIT" --github-env "$GITHUB_ENV"
       - name: Install host test headers
-        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libboost-dev
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libboost-dev python3-yaml
+      - name: Check workflow source preparation and fork policy
+        run: /usr/bin/python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Check production final display recovery validation
         run: |
           git submodule update --init --depth 1 third-party/libdisplaydevice
